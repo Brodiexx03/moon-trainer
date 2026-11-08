@@ -12,7 +12,7 @@ namespace MoonTrainer
     {
         public const string Guid = "moontrainer";
         public const string Name = "Moon Trainer";
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0";
 
         public static ManualLogSource Logger;
 
@@ -53,8 +53,28 @@ namespace MoonTrainer
         public static ConfigEntry<bool> RememberCheats;
         public static ConfigEntry<string> SavedCheats;
 
+        static ConfigFile _cfg;
+        static readonly System.Collections.Generic.Dictionary<string, ConfigEntry<string>> _locations = new System.Collections.Generic.Dictionary<string, ConfigEntry<string>>();
+
+        /// <summary>Saved locations for one save slot (one config line per slot, under [Locations]).</summary>
+        static ConfigEntry<string> LocationEntry(string slot)
+        {
+            var key = System.Text.RegularExpressions.Regex.Replace(slot ?? "default", @"[^A-Za-z0-9_.-]", "_");
+            ConfigEntry<string> e;
+            if (!_locations.TryGetValue(key, out e))
+            {
+                e = _cfg.Bind("Locations", key, "", "Saved locations for save slot " + key + ". Managed by the trainer.");
+                _locations[key] = e;
+            }
+            return e;
+        }
+
+        public static string LocationsFor(string slot) { return LocationEntry(slot).Value; }
+        public static void SetLocationsFor(string slot, string value) { LocationEntry(slot).Value = value; }
+
         public static void Bind(ConfigFile c)
         {
+            _cfg = c;
             MenuKey    = c.Bind("Keys", "MenuKey", "Insert", "Opens and closes the trainer menu (Unity Input System key name, e.g. Insert, F4, Home).");
             FlyKey     = c.Bind("Keys", "FlyKey", "F", "Toggles fly. None to disable.");
             NoclipKey  = c.Bind("Keys", "NoclipKey", "Numpad1", "Toggles no clip (turns fly on too). None to disable.");

@@ -24,7 +24,7 @@ namespace MoonTrainer
         private static bool _membersPrimed;
 
         public static readonly string Help =
-            "trainer, money <amt>, jetpack, boots, nv, belt, lamp, speed, jump, width, payout, all, flag, site, players | fly, noclip, flyspeed <n>, tp <marker#>, tpto <name> (need the mod)";
+            "trainer, money <amt>, jetpack, boots, nv, belt, lamp, speed, jump, width, payout, all, flag, site, players | fly, noclip, flyspeed <n>, tp <marker#>, tpto <name>, save [name], go <name> (need the mod)";
 
         public static void Handle(string senderName, string said, bool fromSelf)
         {
@@ -137,6 +137,12 @@ namespace MoonTrainer
                 case "tp":
                     if (!fromSelf || !Settings.ChatMovement.Value) return;
                     result = Cheats.TeleportToWaypointByNumber(arg); break;
+                case "save": case "mark":
+                    if (!fromSelf) return;
+                    result = Locations.SaveHere(arg); break;
+                case "go":
+                    if (!fromSelf || !Settings.ChatMovement.Value) return;
+                    result = arg == null ? "Usage: " + prefix + "go <saved location>" : Locations.Go(arg); break;
                 case "tpto": case "goto":
                     if (!fromSelf || !Settings.ChatMovement.Value) return;
                     result = arg == null ? "Usage: " + prefix + "tpto <player name>" : Cheats.TeleportToPlayer(arg); break;

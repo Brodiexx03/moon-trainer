@@ -15,6 +15,8 @@ namespace MoonTrainer
 
         /// <summary>Newer version number, once found (read on the main thread).</summary>
         public static volatile string Available;
+        /// <summary>Newest version on GitHub (even if it's ours), once the check has finished.</summary>
+        public static volatile string Latest;
         public static volatile string Notes;
         public static volatile bool Announced;
 
@@ -32,6 +34,7 @@ namespace MoonTrainer
                         var v = Regex.Match(json, "\"version\"\\s*:\\s*\"([^\"]+)\"");
                         var n = Regex.Match(json, "\"notes\"\\s*:\\s*\"([^\"]*)\"");
                         if (!v.Success) return;
+                        Latest = v.Groups[1].Value;
                         if (IsNewer(v.Groups[1].Value, Plugin.Version))
                         {
                             Notes = n.Success ? n.Groups[1].Value : "";

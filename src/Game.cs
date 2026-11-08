@@ -123,7 +123,7 @@ namespace MoonTrainer
 
         // ---- crew --------------------------------------------------------------------------------
 
-        public struct Member { public string Id; public string Name; public bool Local; }
+        public struct Member { public string Id; public string Name; public bool Local; public ulong SteamId; }
 
         /// <summary>Everyone in the lobby (just you when playing solo).</summary>
         public static List<Member> Members()
@@ -142,7 +142,7 @@ namespace MoonTrainer
                         {
                             var m = asList[i];
                             if (m == null) continue;
-                            list.Add(new Member { Id = m.id.ToString(), Name = m.name, Local = m.local });
+                            list.Add(new Member { Id = m.id.ToString(), Name = m.name, Local = m.local, SteamId = m.id });
                         }
                     }
                     else
@@ -153,7 +153,7 @@ namespace MoonTrainer
                         {
                             var m = e.Current;
                             if (m == null) continue;
-                            list.Add(new Member { Id = m.id.ToString(), Name = m.name, Local = m.local });
+                            list.Add(new Member { Id = m.id.ToString(), Name = m.name, Local = m.local, SteamId = m.id });
                         }
                     }
                 }
@@ -209,6 +209,115 @@ namespace MoonTrainer
                 if (r.Contains("->")) n++;
             }
             return n + " upgrades maxed.";
+        }
+
+        // ---- who has the trainer (Steam lobby member data, invisible to players) ----------------------
+
+        const string VersionKey = "moontrainer";
+        static ulong _announcedLobby;
+
+        /// <summary>Publishes our trainer version on the lobby so the host's crew list can show it. Cheap; call often.</summary>
+        public static void AnnounceVersion()
+        {
+            try
+            {
+                if (!MoonSteamLobby.InLobby) { _announcedLobby = 0; return; }
+                ulong lobby = MoonSteamLobby.LobbyId;
+                if (lobby == 0 || lobby == _announcedLobby) return;
+                Steamworks.SteamMatchmaking.SetLobbyMemberData(new Steamworks.CSteamID(lobby), VersionKey, Plugin.Version);
+                _announcedLobby = lobby;
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning("Could not publish trainer version: " + e.Message); _announcedLobby = MoonSteamLobby.LobbyId; }
+        }
+
+        /// <summary>The trainer version a lobby member is running, or null if they don't have it (or have 1.0, which didn't publish it).</summary>
+        public static string TrainerVersionOf(Member m)
+        {
+            if (m.Local) return Plugin.Version;
+            try
+            {
+                if (!MoonSteamLobby.InLobby || m.SteamId == 0) return null;
+                var v = Steamworks.SteamMatchmaking.GetLobbyMemberData(new Steamworks.CSteamID(MoonSteamLobby.LobbyId), new Steamworks.CSteamID(m.SteamId), VersionKey);
+                return string.IsNullOrEmpty(v) ? null : v;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // ---- backups ------------------------------------------------------------------------------
+
+        static float _backupAt;
+
+        /// <summary>Saves now, then takes one of the game's own full backups a few seconds later once the save is written.</summary>
+        public static string BackupNow()
+        {
+            var w = World; if (w == null) return "Not in a game.";
+            if (w.progressStore == null) return "This save has no backup store.";
+            SaveNow();
+            _backupAt = Time.unscaledTime + 4f;
+            return "Saving, then backing up...";
+        }
+
+        public static void TickBackups()
+        {
+            if (_backupAt <= 0 || Time.unscaledTime < _backupAt) return;
+            _backupAt = 0;
+            var w = World; if (w == null || w.progressStore == null) return;
+            try { w.progressStore.TakeFullBackup(); Trainer.Notice("Backup taken."); }
+            catch (Exception e) { Trainer.Notice("Backup failed: " + e.Message); Plugin.Logger.LogWarning(e); }
+        }
+
+        /// <summary>Full-backup manifest paths for this save, newest first.</summary>
+        public static List<string> Backups()
+        {
+            var list = new List<string>();
+            var w = World; if (w == null || w.progressStore == null) return list;
+            try
+            {
+                var raw = w.progressStore.FullBackupManifests();
+                if (raw == null) return list;
+                var asList = raw.TryCast<Il2CppSystem.Collections.Generic.List<string>>();
+                if (asList != null) { for (int i = 0; i < asList.Count; i++) list.Add(asList[i]); }
+                else
+                {
+                    var e = raw.Cast<Il2CppSystem.Collections.Generic.IEnumerable<string>>().GetEnumerator();
+                    var plain = e.Cast<Il2CppSystem.Collections.IEnumerator>();
+                    while (plain.MoveNext()) list.Add(e.Current);
+                }
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning("Listing backups: " + e.Message); }
+            list.Sort((a, b) => string.CompareOrdinal(System.IO.Path.GetFileName(b), System.IO.Path.GetFileName(a)));
+            return list;
+        }
+
+        /// <summary>"2026-11-07 16:17" from a backup file name like "...20261107-161729-187...".</summary>
+        public static string BackupLabel(string manifest)
+        {
+            var name = System.IO.Path.GetFileNameWithoutExtension(manifest) ?? manifest;
+            var m = System.Text.RegularExpressions.Regex.Match(name, @"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})");
+            if (!m.Success) return name;
+            try
+            {
+                var utc = new DateTime(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value),
+                                       int.Parse(m.Groups[4].Value), int.Parse(m.Groups[5].Value), int.Parse(m.Groups[6].Value), DateTimeKind.Utc);
+                return utc.ToLocalTime().ToString("ddd d MMM  h:mm tt");
+            }
+            catch (Exception) { return name; }
+        }
+
+        /// <summary>Puts a backup back in place of the current save and reloads the shift. The current state is backed up first.</summary>
+        public static string RestoreBackup(string manifest)
+        {
+            var w = World; if (w == null || w.progressStore == null) return "Not in a game.";
+            if (IsCrewmate) return "Only the host can restore the save.";
+            try { w.progressStore.TakeFullBackup(); } catch (Exception e) { Plugin.Logger.LogWarning("Pre-restore backup: " + e.Message); }
+            try
+            {
+                w.progressStore.PutBack(manifest);
+                Plugin.Logger.LogInfo("Restored backup " + manifest + "; reloading shift.");
+                MoonSession.ReloadShift();
+                return "Restoring " + BackupLabel(manifest) + "...";
+            }
+            catch (Exception e) { Plugin.Logger.LogError(e); return "Restore failed: " + e.Message; }
         }
 
         // ---- crewmates in the world -------------------------------------------------------------------

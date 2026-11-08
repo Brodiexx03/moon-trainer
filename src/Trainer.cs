@@ -35,8 +35,10 @@ namespace MoonTrainer
         TMP_FontAsset _fontBold, _fontRegular;
         TMP_Text _status, _hudLine, _hudNotice;
         readonly List<Action> _refreshers = new List<Action>();
-        float _nextRefresh, _statusUntil, _nextPersist;
-        bool _rebuildPending;
+        float _nextRefresh, _statusUntil, _nextPersist, _nextAnnounce;
+        List<string> _backups = new List<string>();
+        int _locationCount = -1;
+        bool _rebuildPending; float _rebuildPendingAt;
 
         // dragging
         bool _dragging; Vector2 _dragStart, _panelStart;
@@ -110,6 +112,8 @@ namespace MoonTrainer
                 HandleKeys();
                 Cheats.Tick();
                 Chat.Tick();
+                Game.TickBackups();
+                if (Time.unscaledTime >= _nextAnnounce) { _nextAnnounce = Time.unscaledTime + 5f; Game.AnnounceVersion(); }
                 UpdateHud();
 
                 if (Time.unscaledTime >= _nextPersist) { _nextPersist = Time.unscaledTime + 2f; Settings.SaveCheatsIfChanged(); }
@@ -122,6 +126,7 @@ namespace MoonTrainer
                     var walker = Game.Walker;
                     if (walker != null && !_uiBlocked) { walker.UIBlocked = true; _uiBlocked = true; }
                     Drag();
+                    if (_rebuildPendingAt > 0 && Time.unscaledTime >= _rebuildPendingAt) { _rebuildPendingAt = 0; _rebuildPending = true; }
                     if (_rebuildPending) { _rebuildPending = false; Rebuild(); }
                     if (Time.unscaledTime >= _nextRefresh) Refresh();
                 }
@@ -306,6 +311,8 @@ namespace MoonTrainer
             _updateShown = Updates.Available != null;
             _members = Game.Members();
             if (_memberIndex >= _members.Count) _memberIndex = 0;
+            _backups = Game.Backups();
+            _locationCount = Locations.All().Count;
             _flags = Game.UnraisedLandmarks(MoonLandmarkKind.Flag);
             _sites = Game.UnraisedLandmarks(MoonLandmarkKind.Site);
             if (_flagPos >= _flags.Count) _flagPos = 0;
@@ -320,9 +327,11 @@ namespace MoonTrainer
             if (Section(ref y, "WORLD")) WorldSection(ref y);
             if (Section(ref y, "FLAGS & SITES")) LandmarkSection(ref y);
             if (Section(ref y, "TELEPORT")) TeleportSection(ref y);
+            if (Section(ref y, "SAVED LOCATIONS")) LocationsSection(ref y);
             if (Section(ref y, "BUILD")) BuildSection(ref y);
             if (Section(ref y, "CREW")) CrewSection(ref y);
             if (Section(ref y, "CHAT COMMANDS")) ChatSection(ref y);
+            if (Section(ref y, "BACKUPS")) BackupsSection(ref y);
             if (Section(ref y, "SETTINGS")) SettingsSection(ref y);
             y += Pad;
             _scrollContent.sizeDelta = new Vector2(W - Pad * 2, y);
@@ -502,6 +511,20 @@ namespace MoonTrainer
             ButtonRow(ref y, new[] { "Max every upgrade", "Raise all flags & sites" }, new Func<string>[] {
                 () => Game.GiveAllUpgrades(CurrentMember().Id), () => Done(Cheats.RaiseLandmarks(null, CurrentMember().Id)) });
             Hint(ref y, "Money goes to the shared team wallet. Upgrades, flags and sites are per player.");
+            SubHeader(ref y, "Who has the trainer");
+            foreach (var m in _members)
+            {
+                var mm = m;
+                var t = Text(_scrollContent, "", 0, y, inner - 110 - Gap, Row - 6, 14, false, Cream, TextAlignmentOptions.MidlineLeft);
+                _refreshers.Add(() => t.text = VersionLine(mm));
+                if (!m.Local)
+                    ButtonRaw(_scrollContent, "Send link", inner - 110, y, 110, Row - 6, () =>
+                    {
+                        Chat.Say(mm.Name + ": get or update Moon Trainer - close the game, open PowerShell and run   irm " + Chat.InstallUrl + " | iex");
+                        return "Link posted in chat for " + mm.Name + ".";
+                    }, TextAlignmentOptions.Center);
+                y += Row - 6 + Gap;
+            }
         }
 
         void ChatSection(ref float y)
@@ -522,6 +545,38 @@ namespace MoonTrainer
             Hint(ref y, Settings.ChatPrefix.Value + Chat.Help, 52);
         }
 
+        void LocationsSection(ref float y)
+        {
+            float inner = W - Pad * 2, small = 70;
+            ActionRow(ref y, "Save where I'm standing", () => Locations.SaveHere(null));
+            var spots = Locations.All();
+            if (spots.Count == 0) Hint(ref y, "Nothing saved yet. Tip: type " + Settings.ChatPrefix.Value + "save base in chat to save a spot with your own name, and " + Settings.ChatPrefix.Value + "go base to come back.");
+            foreach (var spot in spots)
+            {
+                string n = spot.Name;
+                ButtonRaw(_scrollContent, n, 0, y, inner - small - Gap, Row, () => Locations.Go(n), TextAlignmentOptions.MidlineLeft);
+                ButtonRaw(_scrollContent, "Delete", inner - small, y, small, Row, () => { _rebuildPending = true; return Locations.Delete(n); }, TextAlignmentOptions.Center, Danger);
+                y += Row + Gap;
+            }
+        }
+
+        void BackupsSection(ref float y)
+        {
+            float inner = W - Pad * 2, small = 84;
+            ActionRow(ref y, "Make a backup now", () => { _rebuildPendingAt = Time.unscaledTime + 6f; return Game.BackupNow(); });
+            Hint(ref y, "The game keeps its own rolling backups too. Restoring backs up your current state first, then reloads the shift.", 30);
+            if (_backups.Count == 0) Hint(ref y, "No backups for this save yet.", 22);
+            int shown = 0;
+            foreach (var b in _backups)
+            {
+                if (shown++ >= 8) break;
+                string manifest = b;
+                Text(_scrollContent, Game.BackupLabel(b), 0, y, inner - small - Gap, Row, 15, false, Cream, TextAlignmentOptions.MidlineLeft);
+                ConfirmButton(inner - small, y, small, "restore:" + manifest, "Restore", () => Game.RestoreBackup(manifest));
+                y += Row + Gap;
+            }
+        }
+
         void SettingsSection(ref float y)
         {
             ToggleRow(ref y, "Remember toggles between launches", () => Settings.RememberCheats.Value, v => Settings.RememberCheats.Value = v);
@@ -536,6 +591,17 @@ namespace MoonTrainer
                 _panel.anchoredPosition = new Vector2(32, -40);
                 return "Menu moved back.";
             });
+        }
+
+        static string VersionLine(Game.Member m)
+        {
+            string latest = Updates.Latest ?? Plugin.Version;
+            if (Updates.IsNewer(Plugin.Version, latest)) latest = Plugin.Version;
+            string v = Game.TrainerVersionOf(m);
+            string name = m.Name + (m.Local ? " (you)" : "");
+            if (v == null) return name + "   <color=#A09C96>not detected - no trainer, or 1.0</color>";
+            if (Updates.IsNewer(latest, v)) return name + "   <color=#FFB347>v" + v + " - out of date</color>";
+            return name + "   <color=#7FD48A>v" + v + "</color>";
         }
 
         Game.Member CurrentMember() { return _members.Count == 0 ? new Game.Member { Id = Game.PlayerId, Name = "You", Local = true } : _members[_memberIndex]; }
@@ -557,6 +623,7 @@ namespace MoonTrainer
             var world = Game.World;
             if (world != null && (world.WaypointRevision != _waypointRevision || world.LandmarkRevision != _landmarkRevision)) _rebuildPending = true;
             if ((Updates.Available != null) != _updateShown) _rebuildPending = true;
+            if (Locations.All().Count != _locationCount) _rebuildPending = true;
         }
 
         // ---- widgets ---------------------------------------------------------------------------------
@@ -652,6 +719,18 @@ namespace MoonTrainer
             }, TextAlignmentOptions.Center, danger ? Danger : (Color?)null);
             _refreshers.Add(() => text.text = (_confirmKey == key && Time.unscaledTime < _confirmUntil) ? "<color=#FFD27F>Click again to confirm</color>" : label);
             y += Row + Gap;
+        }
+
+        void ConfirmButton(float x, float y, float w, string key, string label, Func<string> action)
+        {
+            TMP_Text text = null;
+            text = ButtonRaw(_scrollContent, label, x, y, w, Row, () =>
+            {
+                if (_confirmKey == key && Time.unscaledTime < _confirmUntil) { _confirmKey = null; return action(); }
+                _confirmKey = key; _confirmUntil = Time.unscaledTime + 4f;
+                return "Click " + label + " again to confirm.";
+            }, TextAlignmentOptions.Center, Danger);
+            _refreshers.Add(() => text.text = (_confirmKey == key && Time.unscaledTime < _confirmUntil) ? "<color=#FFD27F>Sure?</color>" : label);
         }
 
         void ButtonRow(ref float y, string[] labels, Func<string>[] actions)

@@ -38,8 +38,10 @@ The menu has collapsible sections (click a header) and can be dragged by its tit
 - **World:** freeze time, time speed, shift time, machine speed, clean N rings around you, finish the Moon, reset all dust, save now.
 - **Flags & sites:** show them on the map, browse unraised ones nearest-first with Go / Raise, raise all.
 - **Teleport:** nearest flag or site, any map marker, any crewmate.
+- **Saved locations:** save the spot you're standing on (auto-named after the nearest landmark, or `!save base` in chat) and teleport back any time. Stored per save slot.
+- **Backups:** make one of the game's full backups on demand, and restore any of the last 8 (your current state is backed up first, then the shift reloads).
 - **Build:** place a dust catcher or robot dock (Mk I, Mk II, Joonas) where you're looking.
-- **Crew (host):** give money, upgrades, flags and sites to any crewmate.
+- **Crew (host):** give money, upgrades, flags and sites to any crewmate, and see who has the trainer and whether they're up to date, with a button to post them the install link.
 - **Chat:** allowlist, per-player cooldown and money limit, welcome message for new joiners.
 - **Settings:** remember toggles, active-cheats line, update check, unlock all Steam achievements.
 
@@ -65,6 +67,7 @@ These only work for players who also have the trainer installed (movement runs o
 
 ```
 !fly [on|off]   !noclip [on|off]   !flyspeed 40   !tp 2   !tpto <name>
+!save [name]    !go <name>        (saved locations)
 ```
 
 ## Notes
