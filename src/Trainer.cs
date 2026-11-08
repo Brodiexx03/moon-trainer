@@ -520,7 +520,7 @@ namespace MoonTrainer
                 if (!m.Local)
                     ButtonRaw(_scrollContent, "Send link", inner - 110, y, 110, Row - 6, () =>
                     {
-                        Chat.Say(mm.Name + ": get or update Moon Trainer - close the game, open PowerShell and run   irm " + Chat.InstallUrl + " | iex");
+                        Chat.SayInstall(mm.Name);
                         return "Link posted in chat for " + mm.Name + ".";
                     }, TextAlignmentOptions.Center);
                 y += Row - 6 + Gap;

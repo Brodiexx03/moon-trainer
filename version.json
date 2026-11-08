@@ -1,4 +1,4 @@
 {
-  "version": "1.2.0",
-  "notes": "New: make and restore save backups, saved locations (!save / !go), and see which crewmates have the trainer."
+  "version": "1.2.1",
+  "notes": "Fix: long chat replies were cut off at the game's 120-character limit; the install command now posts on its own line."
 }

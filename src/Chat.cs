@@ -65,7 +65,9 @@ namespace MoonTrainer
                 case "help": case "commands":
                     result = "Commands: " + Help; break;
                 case "trainer": case "mod": case "install":
-                    result = "Get Moon Trainer: open PowerShell and run   irm " + InstallUrl + " | iex"; break;
+                    SayInstall(fromSelf ? null : senderName);
+                    if (!fromSelf) _lastCommandAt[senderName] = Time.unscaledTime;
+                    return;
                 case "players": case "who":
                     {
                         var names = new List<string>();
@@ -186,13 +188,40 @@ namespace MoonTrainer
 
         private static string OnOff(bool on) { return on ? "on" : "off"; }
 
+        /// <summary>The game cuts chat messages at 120 characters (MoonTalk.MaxLength), prefix included.</summary>
+        const int ChatLimit = 120;
+        const string Tag = "[trainer] ";
+
+        public static string InstallLine { get { return "irm " + InstallUrl + " | iex"; } }
+
         public static void Reply(string text)
         {
             Trainer.Notice(text);
-            if (Settings.ChatReply.Value) _replies.Enqueue(text);
+            if (Settings.ChatReply.Value) Say(text);
         }
 
-        public static void Say(string text) { _replies.Enqueue(text); }
+        /// <summary>Queues a chat message, split at word boundaries so nothing is cut off.</summary>
+        public static void Say(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            int room = ChatLimit - Tag.Length;
+            text = text.Trim();
+            while (text.Length > room)
+            {
+                int cut = text.LastIndexOf(' ', room);
+                if (cut < room / 2) cut = room;            // one very long word: hard cut
+                _replies.Enqueue(text.Substring(0, cut).TrimEnd());
+                text = text.Substring(cut).TrimStart();
+            }
+            if (text.Length > 0) _replies.Enqueue(text);
+        }
+
+        /// <summary>Posts how to install / update, with the command on a line of its own so it can be copied whole.</summary>
+        public static void SayInstall(string forName)
+        {
+            Say((forName != null ? forName + ": to " : "To ") + "get or update Moon Trainer, close the game, open PowerShell and run this:");
+            Say(InstallLine);
+        }
 
         /// <summary>Called every frame; sends queued replies one at a time and watches for crewmates joining.</summary>
         public static void Tick()
@@ -207,7 +236,7 @@ namespace MoonTrainer
             if (Time.unscaledTime - _lastReplyAt < 0.5f) return;
             _lastReplyAt = Time.unscaledTime;
             var text = _replies.Dequeue();
-            try { MoonTalk.Say("[trainer] " + text); }
+            try { MoonTalk.Say(Tag + text); }
             catch (Exception e) { Plugin.Logger.LogWarning("Could not reply in chat: " + e.Message); }
         }
 
