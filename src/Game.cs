@@ -211,6 +211,80 @@ namespace MoonTrainer
             return n + " upgrades maxed.";
         }
 
+        // ---- crewmates in the world -------------------------------------------------------------------
+
+        public static List<MoonRemotePlayer> RemotePlayers()
+        {
+            var list = new List<MoonRemotePlayer>();
+            var found = UnityEngine.Object.FindObjectsByType(Il2CppType.Of<MoonRemotePlayer>(), FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            for (int i = 0; i < found.Length; i++)
+            {
+                var rp = found[i].TryCast<MoonRemotePlayer>();
+                if (rp != null && !string.IsNullOrEmpty(rp.DisplayName)) list.Add(rp);
+            }
+            return list;
+        }
+
+        public static MoonRemotePlayer RemotePlayerByName(string name)
+        {
+            foreach (var rp in RemotePlayers())
+                if (string.Equals(rp.DisplayName, name, StringComparison.OrdinalIgnoreCase)) return rp;
+            return null;
+        }
+
+        /// <summary>Where a player is: the local walker for us, their avatar for a crewmate.</summary>
+        public static bool PositionOf(string name, bool self, out Vector3 pos)
+        {
+            pos = Vector3.zero;
+            if (self) { var w = Walker; if (w == null) return false; pos = w.transform.position; return true; }
+            var rp = RemotePlayerByName(name);
+            if (rp == null) return false;
+            pos = rp.transform.position;
+            return true;
+        }
+
+        // ---- landmarks ------------------------------------------------------------------------------
+
+        /// <summary>Index of the landmark of a kind closest to a point (optionally only unraised ones), or -1.</summary>
+        public static int NearestLandmark(Vector3 from, MoonLandmarkKind kind, bool unraisedOnly)
+        {
+            var w = World; if (w == null) return -1;
+            var up = from.normalized;
+            int best = -1; float bestDot = -2f;
+            int count = w.LandmarkCount;
+            for (int i = 0; i < count; i++)
+            {
+                MoonLandmark lm = null;
+                try { lm = w.Landmark(i); } catch (Exception) { }
+                if (lm == null || lm.kind != kind) continue;
+                if (unraisedOnly && w.IsLandmarkRaised(i)) continue;
+                float dot = Vector3.Dot(up, w.LandmarkDirection(i).normalized);
+                if (dot > bestDot) { bestDot = dot; best = i; }
+            }
+            return best;
+        }
+
+        /// <summary>Unraised landmarks of a kind, nearest first.</summary>
+        public static List<int> UnraisedLandmarks(MoonLandmarkKind kind)
+        {
+            var list = new List<int>();
+            var w = World; var walker = Walker;
+            if (w == null || walker == null) return list;
+            var up = walker.transform.position.normalized;
+            var dots = new Dictionary<int, float>();
+            int count = w.LandmarkCount;
+            for (int i = 0; i < count; i++)
+            {
+                MoonLandmark lm = null;
+                try { lm = w.Landmark(i); } catch (Exception) { }
+                if (lm == null || lm.kind != kind || w.IsLandmarkRaised(i)) continue;
+                list.Add(i);
+                dots[i] = Vector3.Dot(up, w.LandmarkDirection(i).normalized);
+            }
+            list.Sort((a, b) => dots[b].CompareTo(dots[a]));
+            return list;
+        }
+
         // ---- world --------------------------------------------------------------------------------
 
         /// <summary>Ground point under a world position (the Moon's centre is the origin, so "up" is the position's direction).</summary>

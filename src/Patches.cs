@@ -60,6 +60,52 @@ namespace MoonTrainer
             if (Cheats.BrushWidthMult != 1f && Cheats.IsLocal(player)) __result *= Cheats.BrushWidthMult;
         }
 
+        // ---- unlimited bag and hopper ----
+
+        [HarmonyPatch(typeof(MoonDustInventory), nameof(MoonDustInventory.CapacityKg), MethodType.Getter)]
+        [HarmonyPostfix]
+        static void BagCapacity(ref double __result)
+        {
+            if (Cheats.InfiniteBag) __result = Math.Max(__result, 1000000);
+        }
+
+        [HarmonyPatch(typeof(MoonDustInventory), nameof(MoonDustInventory.IsFull), MethodType.Getter)]
+        [HarmonyPostfix]
+        static void BagFull(ref bool __result)
+        {
+            if (Cheats.InfiniteBag) __result = false;
+        }
+
+        [HarmonyPatch(typeof(MoonWorld), nameof(MoonWorld.InventoryFull))]
+        [HarmonyPostfix]
+        static void WorldBagFull(ref bool __result)
+        {
+            if (Cheats.InfiniteBag) __result = false;
+        }
+
+        [HarmonyPatch(typeof(MoonPrototypeVehicle), nameof(MoonPrototypeVehicle.DustCapacityKg), MethodType.Getter)]
+        [HarmonyPostfix]
+        static void HopperCapacity(ref double __result)
+        {
+            if (Cheats.InfiniteHopper) __result = Math.Max(__result, 1000000);
+        }
+
+        [HarmonyPatch(typeof(MoonPrototypeVehicle), nameof(MoonPrototypeVehicle.DustFull), MethodType.Getter)]
+        [HarmonyPostfix]
+        static void HopperFull(ref bool __result)
+        {
+            if (Cheats.InfiniteHopper) __result = false;
+        }
+
+        // ---- map ----
+
+        [HarmonyPatch(typeof(MoonMapScreen), nameof(MoonMapScreen.FlagsOnMap))]
+        [HarmonyPostfix]
+        static void MapFlags(ref bool __result)
+        {
+            if (Cheats.FlagsOnMap) __result = true;
+        }
+
         // ---- money ----
 
         [HarmonyPatch(typeof(MoonWorld), nameof(MoonWorld.PayoutMultiplier))]
