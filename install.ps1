@@ -71,11 +71,35 @@ if ((Test-Path $loader) -and (Test-Path $interop)) {
 }
 
 # ---- 2. Moon Trainer ---------------------------------------------------------------------------
+# Download from the exact latest commit, so GitHub's 5-minute file cache can never hand out an old build.
 $modDir = Join-Path $game "Mods\MoonTrainer"
 New-Item -ItemType Directory -Force -Path $modDir | Out-Null
+$base = $null
+try {
+    $sha = (Invoke-RestMethod "https://api.github.com/repos/$Repo/commits/main" -UseBasicParsing -Headers @{ "User-Agent" = "MoonTrainer-Installer" }).sha
+    if ($sha) { $base = "https://raw.githubusercontent.com/$Repo/$sha" }
+} catch {}
+if (-not $base) { $base = $Raw }                       # API unavailable: fall back, with a cache-busting query below
+$bust = "?t=" + [DateTime]::UtcNow.Ticks
+
+$dll = Join-Path $modDir "MoonTrainer.dll"
+$json = Join-Path $modDir "mod.json"
+$oldVersion = $null
+if (Test-Path $json) { try { $oldVersion = (Get-Content $json -Raw | ConvertFrom-Json).version } catch {} }
+
 Say "Downloading Moon Trainer..."
-Invoke-WebRequest "$Raw/Mods/MoonTrainer/MoonTrainer.dll" -OutFile (Join-Path $modDir "MoonTrainer.dll") -UseBasicParsing
-Invoke-WebRequest "$Raw/Mods/MoonTrainer/mod.json" -OutFile (Join-Path $modDir "mod.json") -UseBasicParsing
+$tmp = "$dll.download"
+Invoke-WebRequest "$base/Mods/MoonTrainer/MoonTrainer.dll$bust" -OutFile $tmp -UseBasicParsing
+Invoke-WebRequest "$base/Mods/MoonTrainer/mod.json$bust" -OutFile $json -UseBasicParsing
+if ((Get-Item $tmp).Length -lt 10000) { Remove-Item $tmp -Force; Say "The download looks broken - try again in a minute." "Red"; return }
+Move-Item $tmp $dll -Force
+(Get-Item $dll).LastWriteTimeUtc = [DateTime]::UtcNow   # make sure the loader sees it as changed
+
+$newVersion = "?"
+try { $newVersion = (Get-Content $json -Raw | ConvertFrom-Json).version } catch {}
+if ($oldVersion -and $oldVersion -ne $newVersion) { Say "Updated Moon Trainer $oldVersion -> $newVersion" "Green" }
+elseif ($oldVersion) { Say "Moon Trainer $newVersion reinstalled (you already had the latest)." "Green" }
+else { Say "Installed Moon Trainer $newVersion" "Green" }
 
 # ---- 3. Enable it ------------------------------------------------------------------------------
 $state = Join-Path $game "BepInEx\config\MoonSweepMods.ModLoader.mods.json"
@@ -87,6 +111,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $state) | Out-Null
 
 Say ""
 Say "Done! Launch Moon Sweepers from Steam." "Green"
+Say "  The console should say: Moon Trainer $newVersion loaded"
 Say "  Insert  opens the trainer menu      F  toggles fly"
 Say "  Chat:   !money 5000  !jetpack  !fly  !help"
 Say ""
