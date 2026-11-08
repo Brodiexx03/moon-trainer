@@ -1,0 +1,7 @@
+{
+  "id": "moontrainer",
+  "name": "Moon Trainer",
+  "version": "1.0.0",
+  "author": "Brodie",
+  "description": "In-game trainer menu (Insert). Fly, no clip, fly speed, move speed, jump height, unlimited jetpack, gravity boots, night vision, add/set money, earnings multiplier, free upgrades, free station travel, vehicle speed, brush width, freeze/shift time of day, machine speed, clean the area around you, teleport to map markers.\n\nHost tools: give money and max upgrades to any crewmate. Chat commands (prefix !): crewmates can type !money 5000, !jetpack, !boots, !nightvision, !speed, !jump, !width, !payout, !all. Players who also have the mod can use !fly, !noclip, !flyspeed and !tp.\n\nF toggles fly without opening the menu. Keys, chat prefix and permissions are in SETTINGS."
+}
