@@ -1,4 +1,4 @@
 {
-  "version": "1.2.1",
-  "notes": "Fix: long chat replies were cut off at the game's 120-character limit; the install command now posts on its own line."
+  "version": "1.2.2",
+  "notes": "Fixes the 1.2.1 build (it still reported 1.2.0, so the update notice never went away) and the chat link being cut off."
 }
