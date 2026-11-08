@@ -12,7 +12,7 @@ namespace MoonTrainer
     {
         public const string Guid = "moontrainer";
         public const string Name = "Moon Trainer";
-        public const string Version = "1.2.2";
+        public const string Version = "1.2.3";
 
         public static ManualLogSource Logger;
 

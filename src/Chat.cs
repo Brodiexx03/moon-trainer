@@ -233,11 +233,62 @@ namespace MoonTrainer
             }
 
             if (_replies.Count == 0) return;
-            if (Time.unscaledTime - _lastReplyAt < 0.5f) return;
+
+            // The game drops a message sent too soon after the last one (MoonTalk.Gap), silently.
+            // Wait out the gap, then check our line landed in the chat history before moving on.
+            float spacing = Mathf.Max(MoonTalk.Gap + 0.35f, 1.0f);
+            if (Time.unscaledTime - _lastReplyAt < spacing) return;
+
+            var text = _replies.Peek();
+            string line = Tag + text;
+            if (_sentPending != null)
+            {
+                if (InHistory(_sentPending) || _attempts >= 3)
+                {
+                    if (_attempts >= 3 && !InHistory(_sentPending)) Plugin.Logger.LogWarning("Chat line never showed up after 3 tries: " + _sentPending);
+                    _replies.Dequeue();
+                    _sentPending = null; _attempts = 0;
+                    return;
+                }
+            }
+            try
+            {
+                MoonTalk.Say(line);
+                _sentPending = line; _attempts++;
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning("Could not reply in chat: " + e.Message); _replies.Dequeue(); _sentPending = null; _attempts = 0; }
             _lastReplyAt = Time.unscaledTime;
-            var text = _replies.Dequeue();
-            try { MoonTalk.Say(Tag + text); }
-            catch (Exception e) { Plugin.Logger.LogWarning("Could not reply in chat: " + e.Message); }
+        }
+
+        static string _sentPending;
+        static int _attempts;
+
+        /// <summary>True if one of the last few chat rows is this line (the game may trim or escape it, so compare loosely).</summary>
+        static bool InHistory(string line)
+        {
+            try
+            {
+                var h = MoonTalk.history;
+                if (h == null) return true;                     // can't tell: assume it went
+                int n = h.Count;
+                string want = Norm(line);
+                for (int i = n - 1; i >= 0 && i >= n - 6; i--)
+                {
+                    var said = h[i];
+                    if (said == null || said.text == null) continue;
+                    var got = Norm(said.text);
+                    if (got.Length > 0 && (got == want || want.StartsWith(got) || got.StartsWith(want))) return true;
+                }
+                return false;
+            }
+            catch (Exception) { return true; }
+        }
+
+        static string Norm(string s)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var c in s) if (!char.IsWhiteSpace(c)) sb.Append(c);
+            return sb.ToString();
         }
 
         static void PollMembers()

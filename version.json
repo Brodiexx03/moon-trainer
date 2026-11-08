@@ -1,4 +1,4 @@
 {
-  "version": "1.2.2",
-  "notes": "Fixes the 1.2.1 build (it still reported 1.2.0, so the update notice never went away) and the chat link being cut off."
+  "version": "1.2.3",
+  "notes": "Chat replies now wait for the game's message gap and resend if a line was dropped, so the install command always comes through."
 }
