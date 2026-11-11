@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using Il2CppInterop.Runtime;
+using Il2CppInterop.Runtime.Attributes;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using MoonCleaners;
 using TMPro;
 using UnityEngine;
@@ -16,44 +18,79 @@ namespace MoonTrainer
         public Trainer(IntPtr ptr) : base(ptr) { }
 
         // ---- layout ----
-        const float W = 460, Pad = 16, Row = 34, Gap = 6, TitleH = 64;
-        static readonly Color PanelColor = new Color(0.07f, 0.07f, 0.09f, 0.95f);
-        static readonly Color Accent = new Color(1f, 0.55f, 0.2f, 1f);
-        static readonly Color BtnColor = new Color(0.18f, 0.18f, 0.21f, 1f);
-        static readonly Color BtnHover = new Color(0.30f, 0.30f, 0.34f, 1f);
-        static readonly Color HeaderColor = new Color(0.12f, 0.12f, 0.14f, 1f);
-        static readonly Color Cream = new Color(0.95f, 0.93f, 0.89f, 1f);
-        static readonly Color Dim = new Color(0.62f, 0.60f, 0.58f, 1f);
-        static readonly Color Danger = new Color(0.55f, 0.16f, 0.14f, 1f);
+        const float PW = 820, PH = 620, Side = 196, Head = 60, CP = 22;
+        const float CW = PW - Side - CP * 2;           // content width
+        const float RowH = 42, BtnH = 36, Gap = 8;
+
+        // ---- palette ----
+        static readonly Color Panel   = Hex("0D0F14", 0.97f);
+        static readonly Color Sidebar = Hex("12151C");
+        static readonly Color CardBg  = Hex("181C25");
+        static readonly Color Btn     = Hex("252A36");
+        static readonly Color Line    = new Color(1, 1, 1, 0.06f);
+        static readonly Color Accent  = Hex("FF8C33");
+        static readonly Color Cream   = Hex("F2EEE6");
+        static readonly Color Dim     = Hex("8B91A0");
+        static readonly Color Faint   = Hex("5B6170");
+        static readonly Color Danger  = Hex("B8392B");
+        static readonly Color Good    = Hex("5BC985");
+        static readonly Color Info    = Hex("5AB4E6");
+        static readonly Color Off     = Hex("3A4050");
+
+        /// <summary>"FF8C33" -> colour. Worked out by hand: this runs while the class is being set up, before anything
+        /// could catch a failed engine call, so it must not make one.</summary>
+        static Color Hex(string h, float a = 1f)
+        {
+            int v = Convert.ToInt32(h, 16);
+            var c = default(Color);
+            c.r = ((v >> 16) & 255) / 255f; c.g = ((v >> 8) & 255) / 255f; c.b = (v & 255) / 255f; c.a = a;
+            return c;
+        }
+
+        static bool Alive(UnityEngine.Object o) { return o != null && !o.WasCollected && o; }
+
+        static readonly string[] Tabs =
+        {
+            "Home", "Player", "Money", "Dust & Vehicle", "World", "Flags & Sites", "Teleport",
+            "Locations", "Build", "Crew", "Chat", "Backups", "Settings"
+        };
 
         static Trainer _instance;
 
         bool _open, _uiBlocked;
+        // what the cursor and the player's controls were doing before the menu opened (put back on close)
+        CursorLockMode _prevLock = CursorLockMode.Locked; bool _prevVisible, _prevBlocked;
+        int _buildFailures; bool _hudBroken, _hooksAnnounced;
+        const string MenuBrokenText = "The trainer menu couldn't be built on this game version. Hotkeys and chat commands still work - details are in the console.";
         GameObject _canvas, _hudCanvas;
         Canvas _canvasComp;
-        RectTransform _panel, _title, _scrollContent;
+        RectTransform _panel, _header, _page, _toastRt, _hudPill;
+        ScrollRect _scroll;
+        CanvasGroup _toastGroup;
         TMP_FontAsset _fontBold, _fontRegular;
-        TMP_Text _status, _hudLine, _hudNotice;
-        readonly List<Action> _refreshers = new List<Action>();
-        float _nextRefresh, _statusUntil, _nextPersist, _nextAnnounce;
-        List<string> _backups = new List<string>();
-        int _locationCount = -1;
+        TMP_Text _toastText, _hudLine, _hudNotice;
+        readonly List<Action> _refreshers = new List<Action>();       // current page
+        readonly List<Action> _chrome = new List<Action>();           // sidebar, header (built once)
+        float _nextRefresh, _toastUntil, _nextPersist, _nextAnnounce;
         bool _rebuildPending; float _rebuildPendingAt;
+        string _tab = "Home";
+
+        // content cursor: widgets are placed at (_x, y) with width _w inside _page
+        float _x, _w;
 
         // dragging
         bool _dragging; Vector2 _dragStart, _panelStart;
 
         // things that force a rebuild when they change
-        int _waypointRevision = -1, _landmarkRevision = -1;
+        int _waypointRevision = -1, _landmarkRevision = -1, _locationCount = -1;
         bool _updateShown;
 
-        // crew selection
+        // data cached per rebuild
         int _memberIndex;
         List<Game.Member> _members = new List<Game.Member>();
-
-        // landmark browser
         List<int> _flags = new List<int>(), _sites = new List<int>();
         int _flagPos, _sitePos;
+        List<string> _backups = new List<string>();
 
         // two-click confirmations
         string _confirmKey; float _confirmUntil;
@@ -67,11 +104,13 @@ namespace MoonTrainer
         void Start()
         {
             _instance = this;
+            _tab = Array.IndexOf(Tabs, Settings.LastTab.Value) >= 0 ? Settings.LastTab.Value : "Home";
             _chimeAt = Time.unscaledTime + 2f;   // chime once the first scene is up so the player hears the mod attached
             Notice("Moon Trainer " + Plugin.Version + " loaded - " + Settings.MenuKey.Value + " opens the menu");
         }
 
         /// <summary>Two rising tones generated on the fly (no audio files needed).</summary>
+        [HideFromIl2Cpp]
         void Chime(float lowHz, float highHz)
         {
             try
@@ -97,27 +136,39 @@ namespace MoonTrainer
 
         void Update()
         {
+            // Each part is guarded on its own, so one failing (say, after a game update) can't stop the others.
             try
             {
                 if (!_chimed && Time.unscaledTime >= _chimeAt) { _chimed = true; Chime(660f, 990f); }
 
-                // An update was found in the background: say so once, in game, with a different chime.
                 if (Updates.Available != null && !Updates.Announced && Game.InGame)
                 {
                     Updates.Announced = true;
                     Notice("Moon Trainer " + Updates.Available + " is available - open the menu (" + Settings.MenuKey.Value + ") to update.");
                     Chime(990f, 1320f);
                 }
+                if (!_hooksAnnounced && Plugin.FailedHooks.Count > 0 && Game.InGame)
+                {
+                    _hooksAnnounced = true;
+                    Notice("Some trainer features are off on this game version: " + Plugin.FailedFeatures() + ".");
+                }
+            }
+            catch (Exception e) { LogOnce("startup", e); }
 
-                HandleKeys();
-                Cheats.Tick();
-                Chat.Tick();
+            try { HandleKeys(); } catch (Exception e) { LogOnce("hotkeys", e); }
+            try { Cheats.Tick(); } catch (Exception e) { LogOnce("cheats", e); }
+            try { Chat.Tick(); } catch (Exception e) { LogOnce("chat", e); }
+            try
+            {
                 Game.TickBackups();
                 if (Time.unscaledTime >= _nextAnnounce) { _nextAnnounce = Time.unscaledTime + 5f; Game.AnnounceVersion(); }
-                UpdateHud();
-
                 if (Time.unscaledTime >= _nextPersist) { _nextPersist = Time.unscaledTime + 2f; Settings.SaveCheatsIfChanged(); }
+            }
+            catch (Exception e) { LogOnce("housekeeping", e); }
+            try { UpdateHud(); } catch (Exception e) { LogOnce("hud", e); }
 
+            try
+            {
                 if (_open && !Game.InGame) Close();
                 if (_open)
                 {
@@ -129,16 +180,34 @@ namespace MoonTrainer
                     if (_rebuildPendingAt > 0 && Time.unscaledTime >= _rebuildPendingAt) { _rebuildPendingAt = 0; _rebuildPending = true; }
                     if (_rebuildPending) { _rebuildPending = false; Rebuild(); }
                     if (Time.unscaledTime >= _nextRefresh) Refresh();
+                    UpdateToast();
                 }
             }
-            catch (Exception e) { Plugin.Logger.LogError(e); }
+            catch (Exception e) { LogOnce("menu", e); }
         }
 
+        static readonly Dictionary<string, float> _logged = new Dictionary<string, float>();
+
+        /// <summary>Logs an error, but the same one at most every 10 seconds (these run every frame).</summary>
+        static void LogOnce(string stage, Exception e)
+        {
+            string key = stage + ":" + e.GetType().Name + ":" + e.Message;
+            float now = Time.unscaledTime, last;
+            if (_logged.TryGetValue(key, out last) && now - last < 10f) return;
+            if (_logged.Count > 100) _logged.Clear();
+            _logged[key] = now;
+            Plugin.Logger.LogError("[" + stage + "] " + e);
+        }
+
+        [HideFromIl2Cpp]
         void HandleKeys()
         {
             var kb = Keyboard.current;
             if (kb == null) return;
-            if (Pressed(kb, Settings.MenuKey.Value)) Toggle();
+            // While the player is typing in chat, keys are text, not hotkeys. (The menu key still closes an open menu.)
+            bool typing = Game.Typing;
+            if (Pressed(kb, Settings.MenuKey.Value) && (_open || !typing)) Toggle();
+            if (typing) return;
             if (Pressed(kb, Settings.HudKey.Value)) { Settings.ShowHud.Value = !Settings.ShowHud.Value; Notice("Active-cheats line " + (Settings.ShowHud.Value ? "on" : "off")); }
             if (_open || !Game.InGame) return;
             if (Pressed(kb, Settings.FlyKey.Value)) { Cheats.SetFly(!Cheats.Fly); Notice("Fly " + OnOff(Cheats.Fly)); }
@@ -159,79 +228,234 @@ namespace MoonTrainer
             return control != null && control.wasPressedThisFrame;
         }
 
+        [HideFromIl2Cpp]
         void Toggle() { if (_open) Close(); else Open(); }
 
+        [HideFromIl2Cpp]
         void Open()
         {
             if (!Game.InGame) { Notice("Load into a game first."); return; }
-            if (_canvas == null || _canvas.WasCollected || !_canvas) Build();
+            if (!Alive(_canvas))
+            {
+                if (_buildFailures >= 3) { Notice(MenuBrokenText); return; }
+                try { Build(); }
+                catch (Exception e)
+                {
+                    // The game ships without the Unity features it doesn't use itself; if the menu needs one of them,
+                    // give up on the window cleanly rather than leaving half of it on screen.
+                    _buildFailures++;
+                    Plugin.Logger.LogError("The trainer menu could not be built: " + e);
+                    try { if (_canvas != null) Destroy(_canvas); } catch (Exception) { }
+                    _canvas = null; _panel = null; _header = null; _page = null; _toastGroup = null; _toastText = null;
+                    Notice(MenuBrokenText);
+                    return;
+                }
+            }
+            var walker = Game.Walker;
+            _prevLock = Cursor.lockState; _prevVisible = Cursor.visible;
+            _prevBlocked = walker != null && walker.UIBlocked;
             _canvas.SetActive(true);
+            ClampPanel();
             _open = true;
             _rebuildPending = true;
         }
 
+        [HideFromIl2Cpp]
         void Close()
         {
             _open = false;
             _dragging = false;
-            if (_canvas != null && !_canvas.WasCollected && _canvas) _canvas.SetActive(false);
+            if (Alive(_canvas)) _canvas.SetActive(false);
             var walker = Game.Walker;
-            if (walker != null && _uiBlocked) walker.UIBlocked = false;
+            // If one of the game's own screens (map, shop, pause) was open underneath and still is, leave the cursor
+            // and controls the way that screen had them. Otherwise hand control back to the player.
+            bool gameScreenOpen = _prevBlocked && walker != null && walker.UIBlocked;
+            if (walker != null && _uiBlocked && !gameScreenOpen) walker.UIBlocked = false;
             _uiBlocked = false;
-            Cursor.lockState = CursorLockMode.Locked;
-            Cursor.visible = false;
+            if (walker == null) return;                 // back at the main menu: the cursor stays free
+            if (gameScreenOpen) { Cursor.lockState = _prevLock; Cursor.visible = _prevVisible; }
+            else { Cursor.lockState = CursorLockMode.Locked; Cursor.visible = false; }
         }
 
-        // ---- dragging the title bar ---------------------------------------------------------------
+        /// <summary>Keeps enough of the window on screen to grab it (a saved position can be off-screen after a resolution change).</summary>
+        [HideFromIl2Cpp]
+        void ClampPanel()
+        {
+            if (_panel == null) return;
+            // The canvas is 1080 units tall and as wide as the screen's shape makes it (see the CanvasScaler in Build).
+            float ch = 1080f, cw = 1080f * Screen.width / Mathf.Max(1, Screen.height);
+            var p = _panel.anchoredPosition;
+            float x = Mathf.Clamp(p.x, -(PW - 200), Mathf.Max(0, cw - 200));
+            float y = Mathf.Clamp(p.y, -(ch - Head), 0);
+            if (x == p.x && y == p.y) return;
+            _panel.anchoredPosition = new Vector2(x, y);
+            Settings.MenuX.Value = x; Settings.MenuY.Value = y;
+        }
 
+        // ---- dragging the header ----------------------------------------------------------------
+
+        [HideFromIl2Cpp]
         void Drag()
         {
             var mouse = Mouse.current;
-            if (mouse == null || _title == null) return;
+            if (mouse == null || _header == null) return;
             Vector2 pos = mouse.position.ReadValue();
-            if (mouse.leftButton.wasPressedThisFrame && RectTransformUtility.RectangleContainsScreenPoint(_title, pos, null))
+            if (mouse.leftButton.wasPressedThisFrame && RectTransformUtility.RectangleContainsScreenPoint(_header, pos, null))
             {
                 _dragging = true; _dragStart = pos; _panelStart = _panel.anchoredPosition;
             }
-            if (_dragging)
+            if (!_dragging) return;
+            if (mouse.leftButton.isPressed)
             {
-                if (mouse.leftButton.isPressed)
+                float scale = _canvasComp != null && _canvasComp.scaleFactor > 0 ? _canvasComp.scaleFactor : 1f;
+                _panel.anchoredPosition = _panelStart + (pos - _dragStart) / scale;
+            }
+            else
+            {
+                _dragging = false;
+                ClampPanel();
+                Settings.MenuX.Value = _panel.anchoredPosition.x;
+                Settings.MenuY.Value = _panel.anchoredPosition.y;
+            }
+        }
+
+        // ---- sprites (generated once: rounded corners, pills, soft shadow) -------------------------
+
+        static Sprite _round, _pill, _soft;
+        const float RoundR = 16, PillR = 32, SoftR = 40;
+
+        static bool _spritesFailed;
+
+        static Sprite MakeSprite(int size, float radius, float feather)
+        {
+            var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            tex.wrapMode = TextureWrapMode.Clamp;
+            tex.filterMode = FilterMode.Bilinear;
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            float half = size / 2f;
+            var alpha = new byte[size * size];
+            for (int py = 0; py < size; py++)
+                for (int px = 0; px < size; px++)
                 {
-                    float scale = _canvasComp != null && _canvasComp.scaleFactor > 0 ? _canvasComp.scaleFactor : 1f;
-                    _panel.anchoredPosition = _panelStart + (pos - _dragStart) / scale;
+                    float qx = Mathf.Abs(px + 0.5f - half) - (half - radius);
+                    float qy = Mathf.Abs(py + 0.5f - half) - (half - radius);
+                    float ox = Mathf.Max(qx, 0), oy = Mathf.Max(qy, 0);
+                    float dist = Mathf.Sqrt(ox * ox + oy * oy) + Mathf.Min(Mathf.Max(qx, qy), 0) - radius;
+                    float a = feather > 0 ? Mathf.Clamp01(-dist / feather) : Mathf.Clamp01(0.5f - dist);
+                    if (feather > 0) a = a * a * (3 - 2 * a);
+                    alpha[py * size + px] = (byte)Mathf.RoundToInt(a * 255f);
                 }
-                else
+            bool written = false;
+            try
+            {
+                var pixels = new Il2CppStructArray<Color32>(size * size);
+                var c = default(Color32);
+                c.r = c.g = c.b = 255;
+                for (int i = 0; i < alpha.Length; i++) { c.a = alpha[i]; pixels[i] = c; }
+                tex.SetPixels32(pixels);
+                written = true;
+            }
+            catch (Exception e) { Plugin.Logger.LogInfo("Writing a texture in one go isn't available here (" + e.Message + "); doing it pixel by pixel."); }
+            if (!written)
+                for (int i = 0; i < alpha.Length; i++) tex.SetPixel(i % size, i / size, new Color(1, 1, 1, alpha[i] / 255f));
+            tex.Apply();
+            float b = Mathf.Min(half - 1, radius + feather);
+            var s = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f, 0, SpriteMeshType.FullRect, new Vector4(b, b, b, b));
+            s.hideFlags = HideFlags.HideAndDontSave;
+            return s;
+        }
+
+        /// <summary>Makes the rounded shapes once. If this game build can't, the menu falls back to square corners.</summary>
+        static void EnsureSprites()
+        {
+            if (_spritesFailed) return;
+            try
+            {
+                if (!Alive(_round)) _round = MakeSprite(64, RoundR, 0);
+                if (!Alive(_pill)) _pill = MakeSprite(64, PillR, 0);
+                if (!Alive(_soft)) _soft = MakeSprite(128, 24, SoftR);
+            }
+            catch (Exception e) { NoSprites(e); }
+        }
+
+        static void NoSprites(Exception e)
+        {
+            _spritesFailed = true;
+            _round = _pill = _soft = null;
+            Plugin.Logger.LogWarning("Rounded corners aren't available on this game build (" + e.GetType().Name + ": " + e.Message + "). The menu will use square corners.");
+        }
+
+        /// <summary>A rounded-rectangle image. radius is in canvas pixels; 0 = square.</summary>
+        static Image Box(Transform parent, string name, float x, float y, float w, float h, Color color, float radius = 8, bool pill = false)
+        {
+            var rt = Rect(parent, name, x, y, w, h);
+            var img = rt.gameObject.AddComponent<Image>();
+            img.color = color;
+            img.raycastTarget = false;
+            if (pill) radius = h / 2f;
+            var sprite = pill ? _pill : _round;
+            if (radius > 0 && !_spritesFailed && sprite != null)
+            {
+                try
                 {
-                    _dragging = false;
-                    Settings.MenuX.Value = _panel.anchoredPosition.x;
-                    Settings.MenuY.Value = _panel.anchoredPosition.y;
+                    img.sprite = sprite;
+                    img.type = Image.Type.Sliced;
+                    img.pixelsPerUnitMultiplier = (pill ? PillR : RoundR) / radius;
+                }
+                catch (Exception e)
+                {
+                    NoSprites(e);
+                    try { img.sprite = null; img.type = Image.Type.Simple; } catch (Exception) { }
                 }
             }
+            return img;
         }
 
         // ---- HUD (active cheats + notices) --------------------------------------------------------
 
+        [HideFromIl2Cpp]
         void UpdateHud()
         {
-            if (_hudCanvas == null || _hudCanvas.WasCollected || !_hudCanvas)
+            if (_hudBroken) return;
+            if (!Alive(_hudCanvas))
             {
                 if (!Game.InGame) return;
-                BuildHud();
+                try { BuildHud(); }
+                catch (Exception e)
+                {
+                    _hudBroken = true;
+                    Plugin.Logger.LogError("The on-screen notice line could not be built (notices still appear in this console): " + e);
+                    try { if (_hudCanvas != null) Destroy(_hudCanvas); } catch (Exception) { }
+                    _hudCanvas = null;
+                    return;
+                }
             }
-            bool inGame = Game.InGame;
             string line = "";
-            if (inGame && !_open && Settings.ShowHud.Value)
+            if (Game.InGame && !_open && Settings.ShowHud.Value)
             {
                 line = Cheats.ActiveSummary();
-                if (Updates.Available != null) line = (line.Length > 0 ? line + "      " : "") + "<color=#7FD4FF>UPDATE " + Updates.Available + " AVAILABLE</color>";
+                if (Updates.Available != null) line = (line.Length > 0 ? line + "     " : "") + "<color=#5AB4E6>UPDATE " + Updates.Available + "</color>";
             }
-            _hudLine.text = line;
-            _hudNotice.text = (_notice != null && Time.unscaledTime < _noticeUntil) ? _notice : "";
+            if (_hudLine.text != line)
+            {
+                _hudLine.text = line;
+                float w = 0;
+                if (line.Length > 0)
+                {
+                    try { w = _hudLine.GetPreferredValues(line).x + 36; }
+                    catch (Exception) { w = Mathf.Min(1700, line.Length * 9f + 36); }
+                }
+                _hudPill.sizeDelta = new Vector2(w, 30);
+                _hudPill.gameObject.SetActive(line.Length > 0);
+            }
+            _hudNotice.text = (!_open && _notice != null && Time.unscaledTime < _noticeUntil) ? _notice : "";
         }
 
+        [HideFromIl2Cpp]
         void BuildHud()
         {
             FindFonts();
+            EnsureSprites();
             _hudCanvas = new GameObject("MoonTrainer HUD");
             DontDestroyOnLoad(_hudCanvas);
             var canvas = _hudCanvas.AddComponent<Canvas>();
@@ -242,22 +466,30 @@ namespace MoonTrainer
             scaler.referenceResolution = new Vector2(1920, 1080);
             scaler.matchWidthOrHeight = 1;
 
-            var top = Rect(_hudCanvas.transform, "Active", 0, 10, 1400, 26);
-            top.anchorMin = top.anchorMax = new Vector2(0.5f, 1); top.pivot = new Vector2(0.5f, 1);
-            top.anchoredPosition = new Vector2(0, -10);
-            _hudLine = AddText(top.gameObject, 15, true, Accent, TextAlignmentOptions.Center);
+            var pill = Box(_hudCanvas.transform, "Active", 0, 0, 10, 30, new Color(0.05f, 0.06f, 0.08f, 0.82f), pill: true);
+            _hudPill = pill.rectTransform;
+            _hudPill.anchorMin = _hudPill.anchorMax = new Vector2(0.5f, 1); _hudPill.pivot = new Vector2(0.5f, 1);
+            _hudPill.anchoredPosition = new Vector2(0, -12);
+            var lineRt = Rect(_hudPill, "Text", 0, 0, 10, 30);
+            lineRt.anchorMin = Vector2.zero; lineRt.anchorMax = Vector2.one; lineRt.sizeDelta = Vector2.zero; lineRt.anchoredPosition = Vector2.zero;
+            _hudLine = AddText(lineRt.gameObject, 13, true, Accent, TextAlignmentOptions.Center);
+            _hudLine.characterSpacing = 2;
+            _hudPill.gameObject.SetActive(false);
 
             var bottom = Rect(_hudCanvas.transform, "Notice", 0, 0, 1200, 30);
             bottom.anchorMin = bottom.anchorMax = new Vector2(0, 0); bottom.pivot = new Vector2(0, 0);
-            bottom.anchoredPosition = new Vector2(20, 18);
-            _hudNotice = AddText(bottom.gameObject, 18, true, Cream, TextAlignmentOptions.BottomLeft);
+            bottom.anchoredPosition = new Vector2(24, 20);
+            _hudNotice = AddText(bottom.gameObject, 17, true, Cream, TextAlignmentOptions.BottomLeft);
         }
 
-        // ---- building the menu ------------------------------------------------------------------------
+        // ---- building the window -----------------------------------------------------------------------
 
+        [HideFromIl2Cpp]
         void Build()
         {
             FindFonts();
+            EnsureSprites();
+            _chrome.Clear();
             if (EventSystem.current == null)
             {
                 var es = new GameObject("MoonTrainer EventSystem");
@@ -277,470 +509,859 @@ namespace MoonTrainer
             scaler.matchWidthOrHeight = 1;
             _canvas.AddComponent<GraphicRaycaster>();
 
-            float height = 1000;
-            _panel = Rect(_canvas.transform, "Panel", 0, 0, W, height);
+            _panel = Rect(_canvas.transform, "Window", 0, 0, PW, PH);
             _panel.anchoredPosition = new Vector2(Settings.MenuX.Value, Settings.MenuY.Value);
-            _panel.gameObject.AddComponent<Image>().color = PanelColor;
-            Rect(_panel, "Accent", 0, 0, 5, height).gameObject.AddComponent<Image>().color = Accent;
 
-            float inner = W - Pad * 2;
-            _title = Rect(_panel, "Title", 0, 0, W, TitleH);
-            Text(_panel, "MOON TRAINER", Pad, Pad - 4, inner, 34, 26, true, Cream, TextAlignmentOptions.MidlineLeft);
-            Text(_panel, "v" + Plugin.Version + "  ·  drag to move  ·  " + Settings.MenuKey.Value + " closes", Pad, Pad - 4, inner, 34, 12, false, Dim, TextAlignmentOptions.MidlineRight);
-            _status = Text(_panel, "", Pad, Pad + 32, inner, 22, 14, false, Accent, TextAlignmentOptions.MidlineLeft);
+            // soft shadow, border, body
+            var shadow = Box(_panel, "Shadow", -30, -26, PW + 60, PH + 64, new Color(0, 0, 0, 0.55f), 0);
+            if (_soft != null && !_spritesFailed)
+            {
+                try { shadow.sprite = _soft; shadow.type = Image.Type.Sliced; shadow.pixelsPerUnitMultiplier = 1; }
+                catch (Exception) { shadow.enabled = false; }
+            }
+            else shadow.enabled = false;
+            Box(_panel, "Border", -1, -1, PW + 2, PH + 2, new Color(1, 1, 1, 0.09f), 15);
+            var body = Box(_panel, "Body", 0, 0, PW, PH, Panel, 14);
+            body.raycastTarget = true;   // swallow clicks so they don't reach the game
 
-            var view = Rect(_panel, "Body", Pad, TitleH + 8, inner, height - TitleH - 8 - Pad);
+            // sidebar
+            Box(_panel, "Sidebar", 0, 0, Side, PH, Sidebar, 14);
+            Box(_panel, "SidebarEdge", Side - 14, 0, 14, PH, Sidebar, 0);
+            Box(_panel, "Divider", Side, 0, 1, PH, Line, 0);
+
+            // header (drag handle) over the content side
+            _header = Rect(_panel, "Header", 0, 0, PW - 56, Head);
+            Box(_panel, "HeaderLine", Side, Head, PW - Side, 1, Line, 0);
+
+            // brand in the sidebar
+            Box(_panel, "Logo", 18, 18, 26, 26, Accent, 7);
+            Text(_panel, "M", 18, 18, 26, 26, 16, true, Hex("16120E"), TextAlignmentOptions.Center);
+            Text(_panel, "MOON TRAINER", 52, 14, Side - 60, 20, 15, true, Cream, TextAlignmentOptions.MidlineLeft).characterSpacing = 3;
+            Text(_panel, "v" + Plugin.Version, 52, 33, Side - 60, 16, 11, false, Dim, TextAlignmentOptions.MidlineLeft);
+
+            // tabs
+            float ty = Head + 12;
+            foreach (var tab in Tabs)
+            {
+                string t = tab;
+                var bg = Box(_panel, "Tab " + t, 10, ty, Side - 20, 34, Color.clear, 8);
+                var bar = Box(_panel, "TabBar", 10, ty + 8, 3, 18, Accent, 1.5f);
+                var label = Text(_panel, t, 24, ty, Side - 44, 34, 14, true, Dim, TextAlignmentOptions.MidlineLeft);
+                MakeClickable(bg, () => { SwitchTab(t); return null; }, Color.clear, new Color(1, 1, 1, 0.04f));
+                _chrome.Add(() =>
+                {
+                    bool on = _tab == t;
+                    bg.GetComponent<Button>().colors = Colors(on ? new Color(1, 1, 1, 0.06f) : Color.clear, new Color(1, 1, 1, on ? 0.08f : 0.04f));
+                    bar.enabled = on;
+                    label.color = on ? Cream : Dim;
+                });
+                ty += 36;
+            }
+
+            // footer of the sidebar: quick "all off"
+            var off = Box(_panel, "AllOff", 14, PH - 50, Side - 28, 34, Btn, 8);
+            Text(off.transform, "Turn everything off", 0, 0, Side - 28, 34, 13, true, Dim, TextAlignmentOptions.Center);
+            MakeClickable(off, () => Cheats.Off(), Btn, Danger);
+
+            // page title area
+            var title = Text(_panel, "", Side + CP, 10, CW - 40, 26, 20, true, Cream, TextAlignmentOptions.MidlineLeft);
+            var subtitle = Text(_panel, "", Side + CP, 34, CW - 40, 18, 12, false, Dim, TextAlignmentOptions.MidlineLeft);
+            _chrome.Add(() => { title.text = _tab; subtitle.text = Subtitle(_tab); });
+
+            // close button
+            var close = Box(_panel, "Close", PW - 46, 14, 32, 32, Btn, 8);
+            Text(close.transform, "X", 0, 0, 32, 32, 14, true, Dim, TextAlignmentOptions.Center);
+            MakeClickable(close, () => { Close(); return null; }, Color.clear, Danger);
+
+            // scrolling page
+            var view = Rect(_panel, "View", Side, Head + 1, PW - Side, PH - Head - 1);
             view.gameObject.AddComponent<RectMask2D>();
-            _scrollContent = Rect(view, "Content", 0, 0, inner, 10);
-            var scroll = view.gameObject.AddComponent<ScrollRect>();
-            scroll.content = _scrollContent; scroll.viewport = view; scroll.horizontal = false;
-            scroll.movementType = ScrollRect.MovementType.Clamped; scroll.scrollSensitivity = 40; scroll.inertia = false;
+            _page = Rect(view, "Page", 0, 0, PW - Side, 10);
+            _scroll = view.gameObject.AddComponent<ScrollRect>();
+            _scroll.content = _page; _scroll.viewport = view; _scroll.horizontal = false;
+            _scroll.movementType = ScrollRect.MovementType.Clamped; _scroll.scrollSensitivity = 45; _scroll.inertia = false;
+
+            // scrollbar (optional: the mouse wheel scrolls the page either way)
+            Image track = null;
+            try
+            {
+                track = Box(view, "ScrollTrack", PW - Side - 10, 8, 4, PH - Head - 17, new Color(1, 1, 1, 0.03f), pill: true);
+                var handle = Box(track.transform, "Handle", 0, 0, 4, 40, new Color(1, 1, 1, 0.18f), pill: true);
+                var hr = handle.rectTransform; hr.anchorMin = Vector2.zero; hr.anchorMax = Vector2.one; hr.sizeDelta = Vector2.zero; hr.anchoredPosition = Vector2.zero;
+                handle.raycastTarget = true;
+                var sb = track.gameObject.AddComponent<Scrollbar>();
+                sb.handleRect = hr; sb.targetGraphic = handle; sb.direction = Scrollbar.Direction.BottomToTop;
+                _scroll.verticalScrollbar = sb;
+                _scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
+            }
+            catch (Exception e)
+            {
+                Plugin.Logger.LogWarning("No scrollbar on this game build (the mouse wheel still scrolls): " + e.Message);
+                try { if (track != null) Destroy(track.gameObject); } catch (Exception) { }
+            }
+
+            // toast
+            var toast = Box(_panel, "Toast", Side + CP, PH - 56, CW, 38, Hex("232836", 0.98f), 10);
+            _toastRt = toast.rectTransform;
+            Box(toast.transform, "ToastAccent", 0, 0, 4, 38, Accent, 2);
+            _toastText = Text(toast.transform, "", 16, 0, CW - 28, 38, 13, true, Cream, TextAlignmentOptions.MidlineLeft);
+            try
+            {
+                _toastGroup = toast.gameObject.AddComponent<CanvasGroup>();
+                _toastGroup.alpha = 0; _toastGroup.blocksRaycasts = false;
+            }
+            catch (Exception) { _toastGroup = null; toast.gameObject.SetActive(false); }   // no fading: the toast just pops in and out
 
             Plugin.Logger.LogInfo("Trainer menu built.");
         }
 
-        /// <summary>Clears the menu body and lays every section out again (collapsed sections show just their header).</summary>
+        static string Subtitle(string tab)
+        {
+            switch (tab)
+            {
+                case "Home": return "Presets and the things you use most.";
+                case "Player": return "Movement, suit and gear.";
+                case "Money": return "The team wallet and what things cost.";
+                case "Dust & Vehicle": return "Your bag, selling, and the vehicle hopper.";
+                case "World": return "Time of day, machines and cleaning.";
+                case "Flags & Sites": return "Find, visit and raise landmarks.";
+                case "Teleport": return "Jump to landmarks, markers or crewmates.";
+                case "Locations": return "Spots you've saved on this save.";
+                case "Build": return "Place buildings where you're looking.";
+                case "Crew": return "Help out the people in your lobby.";
+                case "Chat": return "What crewmates may do with chat commands.";
+                case "Backups": return "Snapshots of this save you can roll back to.";
+                case "Settings": return "How the trainer behaves.";
+            }
+            return "";
+        }
+
+        [HideFromIl2Cpp]
+        void SwitchTab(string tab)
+        {
+            if (_tab == tab) return;
+            _tab = tab;
+            Settings.LastTab.Value = tab;
+            _rebuildPending = true;
+        }
+
+        // ---- pages ---------------------------------------------------------------------------------------
+
+        /// <summary>Clears the page and lays out the current tab.</summary>
+        [HideFromIl2Cpp]
         void Rebuild()
         {
-            for (int i = _scrollContent.childCount - 1; i >= 0; i--) Destroy(_scrollContent.GetChild(i).gameObject);
+            for (int i = _page.childCount - 1; i >= 0; i--) Destroy(_page.GetChild(i).gameObject);
             _refreshers.Clear();
 
             var world = Game.World;
             _waypointRevision = world == null ? -1 : world.WaypointRevision;
             _landmarkRevision = world == null ? -1 : world.LandmarkRevision;
+            _locationCount = Locations.All().Count;
             _updateShown = Updates.Available != null;
             _members = Game.Members();
             if (_memberIndex >= _members.Count) _memberIndex = 0;
-            _backups = Game.Backups();
-            _locationCount = Locations.All().Count;
+
+            float y = 18;
+            _x = CP; _w = CW;
+            try
+            {
+                switch (_tab)
+                {
+                    case "Home": HomePage(ref y); break;
+                    case "Player": PlayerPage(ref y); break;
+                    case "Money": HostOnly(ref y, "the wallet"); MoneyPage(ref y); break;
+                    case "Dust & Vehicle": DustPage(ref y); break;
+                    case "World": HostOnly(ref y, "cleaning, machines and the save"); WorldPage(ref y); break;
+                    case "Flags & Sites": HostOnly(ref y, "flags and sites"); LandmarkPage(ref y); break;
+                    case "Teleport": TeleportPage(ref y); break;
+                    case "Locations": LocationsPage(ref y); break;
+                    case "Build": HostOnly(ref y, "buildings"); BuildPage(ref y); break;
+                    case "Crew": HostOnly(ref y, "everyone's wallet and upgrades"); CrewPage(ref y); break;
+                    case "Chat": ChatPage(ref y); break;
+                    case "Backups": HostOnly(ref y, "the save and its backups"); BackupsPage(ref y); break;
+                    case "Settings": SettingsPage(ref y); break;
+                }
+            }
+            catch (Exception e)
+            {
+                // One page failing (say, the game changed something it reads) shouldn't take the whole menu with it.
+                Plugin.Logger.LogError("The " + _tab + " page could not be shown: " + e);
+                _x = CP; _w = CW;
+                y += 12;
+                try
+                {
+                    var t = Text(_page, "This page hit an error and can't be shown fully. The other tabs still work - details are in the console.",
+                        CP, y, CW, 44, 14, true, Cream, TextAlignmentOptions.TopLeft);
+                    t.textWrappingMode = TextWrappingModes.Normal;
+                }
+                catch (Exception) { }
+                y += 52;
+            }
+            y += 70;   // room for the toast
+            _page.sizeDelta = new Vector2(PW - Side, y);
+            _page.anchoredPosition = Vector2.zero;
+            Refresh();
+        }
+
+        [HideFromIl2Cpp]
+        void HomePage(ref float y)
+        {
+            if (_updateShown)
+            {
+                var c = Card(ref y, null, Hex("10283A"));
+                Label(ref y, "<color=#5AB4E6>UPDATE AVAILABLE</color>   v" + Updates.Available + "  <color=#8B91A0>(you have " + Plugin.Version + ")</color>", 15, true);
+                if (!string.IsNullOrEmpty(Updates.Notes)) Hint(ref y, Updates.Notes);
+                Buttons(ref y, new[] { "Copy update command" }, new Func<string>[] { () =>
+                {
+                    GUIUtility.systemCopyBuffer = Updates.InstallCommand;
+                    return "Copied. Close the game, open PowerShell, right-click to paste, press Enter.";
+                } }, Info);
+                EndCard(c, ref y);
+            }
+
+            if (Plugin.FailedHooks.Count > 0)
+            {
+                var fh = Card(ref y, null, Hex("3A2412"));
+                Label(ref y, "<color=#FF8C33>SOME FEATURES ARE OFF</color>", 15, true);
+                Hint(ref y, "The game has changed since this trainer was built, so these can't hook in: " + Plugin.FailedFeatures()
+                    + ". Everything else works. Check for a trainer update.").color = Cream;
+                EndCard(fh, ref y);
+            }
+
+            var p = Card(ref y, "Presets");
+            Buttons(ref y, new[] { "Exploring", "Grinding", "Building" }, new Func<string>[] {
+                () => Cheats.Preset("explore"), () => Cheats.Preset("grind"), () => Cheats.Preset("build") });
+            Hint(ref y, "Exploring: fly + noclip, night vision, frozen time, flags on the map.   Grinding: 5x money, wide brush, big bag, fast machines.   Building: fly, free upgrades, fast machines.");
+            EndCard(p, ref y);
+
+            var q = Card(ref y, "Quick toggles");
+            Switch(ref y, "Fly", "Space / Ctrl to go up and down", () => Cheats.Fly, v => Cheats.SetFly(v));
+            Switch(ref y, "No clip", "Fly through terrain and buildings", () => Cheats.Noclip, v => { Cheats.Noclip = v; if (v) Cheats.SetFly(true); });
+            Switch(ref y, "Unlimited jetpack", null, () => Cheats.InfiniteJetpack, v => Cheats.InfiniteJetpack = v);
+            Switch(ref y, "Unlimited bag", null, () => Cheats.InfiniteBag, v => Cheats.InfiniteBag = v);
+            Switch(ref y, "Freeze time of day", null, () => Cheats.FreezeTime, v => Cheats.FreezeTime = v);
+            EndCard(q, ref y);
+
+            var a = Card(ref y, "Active right now");
+            var t = Label(ref y, "", 13, true);
+            t.textWrappingMode = TextWrappingModes.Normal;
+            ((RectTransform)t.transform).sizeDelta = new Vector2(_w, 40);
+            y += 12;
+            _refreshers.Add(() => { var s = Cheats.ActiveSummary(); t.text = s.Length == 0 ? "<color=#8B91A0>Nothing - the game is vanilla.</color>" : "<color=#FF8C33>" + s + "</color>"; });
+            EndCard(a, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void PlayerPage(ref float y)
+        {
+            var m = Card(ref y, "Movement");
+            Switch(ref y, "Fly", "Space / Ctrl to go up and down", () => Cheats.Fly, v => Cheats.SetFly(v));
+            Switch(ref y, "No clip", "Only while flying", () => Cheats.Noclip, v => { Cheats.Noclip = v; if (v) Cheats.SetFly(true); });
+            Stepper(ref y, "Fly speed", () => Cheats.FlySpeed, v => Cheats.FlySpeed = Mathf.Clamp(v, 2, 500), 5, "0");
+            Stepper(ref y, "Move speed", () => Cheats.SpeedMult, v => Cheats.SpeedMult = Mathf.Clamp(v, 0.25f, 20), 0.5f, "0.0#", "x");
+            Stepper(ref y, "Jump height", () => Cheats.JumpMult, v => Cheats.JumpMult = Mathf.Clamp(v, 0.25f, 20), 0.5f, "0.0#", "x");
+            EndCard(m, ref y);
+
+            var s = Card(ref y, "Suit");
+            Switch(ref y, "Unlimited jetpack", null, () => Cheats.InfiniteJetpack, v => Cheats.InfiniteJetpack = v);
+            Switch(ref y, "Gravity boots", null, () => Cheats.GravityBoots, v => Cheats.GravityBoots = v);
+            Switch(ref y, "Night vision", null, () => Cheats.NightVision, v => Cheats.NightVision = v);
+            y += 4;
+            Buttons(ref y, new[] { "Refill jetpack + energy", "Max all my upgrades" }, new Func<string>[] {
+                () => Cheats.RefillAll(), () => Game.GiveAllUpgrades(Game.PlayerId) });
+            EndCard(s, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void MoneyPage(ref float y)
+        {
+            var w = Card(ref y, "Team wallet");
+            var money = Text(_page, "", _x, y, _w, 44, 30, true, Cream, TextAlignmentOptions.MidlineLeft); y += 48;
+            _refreshers.Add(() => money.text = "$" + Game.Money(Game.PlayerId).ToString("N0"));
+            Buttons(ref y, new[] { "+1k", "+10k", "+100k", "+1M" }, new Func<string>[] {
+                () => AddMoney(1000), () => AddMoney(10000), () => AddMoney(100000), () => AddMoney(1000000) }, Accent);
+            Buttons(ref y, new[] { "Set 0", "Set 100k", "Set 10M" }, new Func<string>[] {
+                () => SetMoney(0), () => SetMoney(100000), () => SetMoney(10000000) });
+            EndCard(w, ref y);
+
+            var e = Card(ref y, "Earning & spending");
+            Stepper(ref y, "Earnings", () => Cheats.PayoutMult, v => Cheats.PayoutMult = Mathf.Clamp(v, 0.25f, 100), 1f, "0.0#", "x");
+            Switch(ref y, "Free upgrades & tools", null, () => Cheats.FreeUpgrades, v => Cheats.FreeUpgrades = v);
+            Switch(ref y, "Free station travel", null, () => Cheats.FreeTravel, v => Cheats.FreeTravel = v);
+            EndCard(e, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void DustPage(ref float y)
+        {
+            var b = Card(ref y, "Your bag");
+            Switch(ref y, "Unlimited capacity", null, () => Cheats.InfiniteBag, v => Cheats.InfiniteBag = v);
+            Switch(ref y, "Auto-sell what I collect", "Experimental", () => Cheats.AutoSell, v => Cheats.AutoSell = v);
+            y += 4;
+            Buttons(ref y, new[] { "Fill", "Empty", "Sell now" }, new Func<string>[] {
+                () => Cheats.SetCarried(true), () => Cheats.SetCarried(false), () => Cheats.SellCarried(true) });
+            EndCard(b, ref y);
+
+            var v = Card(ref y, "Vehicle");
+            Stepper(ref y, "Speed", () => Cheats.VehicleSpeedMult, x => Cheats.VehicleSpeedMult = Mathf.Clamp(x, 0.25f, 20), 0.5f, "0.0#", "x");
+            Stepper(ref y, "Brush width", () => Cheats.BrushWidthMult, x => Cheats.BrushWidthMult = Mathf.Clamp(x, 0.25f, 20), 0.5f, "0.0#", "x");
+            Switch(ref y, "Unlimited hopper", null, () => Cheats.InfiniteHopper, x => Cheats.InfiniteHopper = x);
+            y += 4;
+            Buttons(ref y, new[] { "Fill hopper", "Empty hopper" }, new Func<string>[] {
+                () => Cheats.SetHopper(true), () => Cheats.SetHopper(false) });
+            EndCard(v, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void WorldPage(ref float y)
+        {
+            var t = Card(ref y, "Time");
+            var clock = Text(_page, "", _x, y, _w, 40, 26, true, Cream, TextAlignmentOptions.MidlineLeft); y += 44;
+            _refreshers.Add(() => clock.text = Cheats.TimeText() + "  <size=13><color=#8B91A0>lunar time</color></size>");
+            Switch(ref y, "Freeze time of day", null, () => Cheats.FreezeTime, v => Cheats.FreezeTime = v);
+            Stepper(ref y, "Time speed", () => Cheats.TimeSpeed, v => Cheats.TimeSpeed = Mathf.Clamp(Mathf.Round(v * 4) / 4, 0.25f, 50), 0.25f, "0.##", "x");
+            y += 4;
+            Buttons(ref y, new[] { "-1 h", "+1 h", "+6 h", "+12 h" }, new Func<string>[] {
+                () => Cheats.ShiftTime(-1), () => Cheats.ShiftTime(1), () => Cheats.ShiftTime(6), () => Cheats.ShiftTime(12) });
+            EndCard(t, ref y);
+
+            var m = Card(ref y, "Machines");
+            Stepper(ref y, "Machine speed", () => Cheats.MachineSpeed, v => Cheats.MachineSpeed = Mathf.Clamp(v, 0.25f, 50), 1f, "0.0#", "x");
+            EndCard(m, ref y);
+
+            var c = Card(ref y, "Cleaning");
+            Stepper(ref y, "Clean radius", () => Cheats.CleanRings, v => Cheats.CleanRings = Mathf.Clamp(Mathf.RoundToInt(v), 1, 60), 1f, "0", " rings", 10f);
+            y += 4;
+            var go = Buttons(ref y, new[] { "" }, new Func<string>[] { () => Cheats.CleanAround(Cheats.CleanRings) }, Accent);
+            _refreshers.Add(() => go[0].text = "Clean " + Cheats.CleanRings + " ring" + (Cheats.CleanRings == 1 ? "" : "s") + " around me");
+            Buttons(ref y, new[] { "Finish the Moon (leave 1)" }, new Func<string>[] { () => Cheats.FinishMoon(true) });
+            Confirm(ref y, "finish", "Finish the Moon completely", () => Cheats.FinishMoon(false), false);
+            Confirm(ref y, "resetdust", "Reset all dust (undo cleaning)", () => Cheats.ResetDust(), true);
+            EndCard(c, ref y);
+
+            var s = Card(ref y, null);
+            Buttons(ref y, new[] { "Save game now" }, new Func<string>[] { () => Game.SaveNow() });
+            EndCard(s, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void LandmarkPage(ref float y)
+        {
             _flags = Game.UnraisedLandmarks(MoonLandmarkKind.Flag);
             _sites = Game.UnraisedLandmarks(MoonLandmarkKind.Site);
             if (_flagPos >= _flags.Count) _flagPos = 0;
             if (_sitePos >= _sites.Count) _sitePos = 0;
 
-            float y = 0;
-            if (_updateShown) UpdateSection(ref y);
-            if (Section(ref y, "PRESETS")) PresetsSection(ref y);
-            if (Section(ref y, "PLAYER")) PlayerSection(ref y);
-            if (Section(ref y, "MONEY")) MoneySection(ref y);
-            if (Section(ref y, "DUST & VEHICLE")) DustSection(ref y);
-            if (Section(ref y, "WORLD")) WorldSection(ref y);
-            if (Section(ref y, "FLAGS & SITES")) LandmarkSection(ref y);
-            if (Section(ref y, "TELEPORT")) TeleportSection(ref y);
-            if (Section(ref y, "SAVED LOCATIONS")) LocationsSection(ref y);
-            if (Section(ref y, "BUILD")) BuildSection(ref y);
-            if (Section(ref y, "CREW")) CrewSection(ref y);
-            if (Section(ref y, "CHAT COMMANDS")) ChatSection(ref y);
-            if (Section(ref y, "BACKUPS")) BackupsSection(ref y);
-            if (Section(ref y, "SETTINGS")) SettingsSection(ref y);
-            y += Pad;
-            _scrollContent.sizeDelta = new Vector2(W - Pad * 2, y);
-            Refresh();
-        }
+            var m = Card(ref y, "Map");
+            Switch(ref y, "Show flags & sites on the map", null, () => Cheats.FlagsOnMap, v => Cheats.FlagsOnMap = v);
+            EndCard(m, ref y);
 
-        void UpdateSection(ref float y)
-        {
-            float inner = W - Pad * 2;
-            var box = Rect(_scrollContent, "Update", 0, y, inner, 92);
-            box.gameObject.AddComponent<Image>().color = new Color(0.08f, 0.22f, 0.30f, 1f);
-            Text(box, "UPDATE AVAILABLE  ·  v" + Updates.Available + "  <size=12><color=#A0C8DA>(you have " + Plugin.Version + ")</color></size>", 12, 6, inner - 24, 24, 16, true, Cream, TextAlignmentOptions.MidlineLeft);
-            var notes = Text(box, string.IsNullOrEmpty(Updates.Notes) ? "Close the game, then paste the install command into PowerShell." : Updates.Notes, 12, 30, inner - 24, 20, 12, false, new Color(0.75f, 0.86f, 0.92f), TextAlignmentOptions.MidlineLeft);
-            ButtonRaw(box, "Copy update command", 12, 54, inner - 24, 30, () =>
-            {
-                GUIUtility.systemCopyBuffer = Updates.InstallCommand;
-                return "Copied. Close the game, open PowerShell, paste (right-click) and press Enter.";
-            }, TextAlignmentOptions.Center);
-            y += 92 + Gap * 2;
-        }
+            var f = Card(ref y, "Unraised flags (" + _flags.Count + ")");
+            Browser(ref y, "Flag", _flags, () => _flagPos, v => _flagPos = v);
+            EndCard(f, ref y);
 
-        void PresetsSection(ref float y)
-        {
-            ButtonRow(ref y, new[] { "Exploring", "Grinding", "Building", "All off" }, new Func<string>[] {
-                () => Cheats.Preset("explore"), () => Cheats.Preset("grind"), () => Cheats.Preset("build"), () => Cheats.Off() });
-            Hint(ref y, "Exploring: fly + noclip, night vision, frozen time, flags on map.  Grinding: 5x money, wide brush, big bag.  Building: fly, free upgrades, fast machines.");
-        }
+            var s = Card(ref y, "Unraised sites (" + _sites.Count + ")");
+            Browser(ref y, "Site", _sites, () => _sitePos, v => _sitePos = v);
+            EndCard(s, ref y);
 
-        void PlayerSection(ref float y)
-        {
-            ToggleRow(ref y, "Fly", () => Cheats.Fly, v => Cheats.SetFly(v));
-            ToggleRow(ref y, "No clip (while flying)", () => Cheats.Noclip, v => { Cheats.Noclip = v; if (v) Cheats.SetFly(true); });
-            StepRow(ref y, "Fly speed", () => Cheats.FlySpeed, v => Cheats.FlySpeed = Mathf.Clamp(v, 2, 500), 5, "0");
-            StepRow(ref y, "Move speed x", () => Cheats.SpeedMult, v => Cheats.SpeedMult = Mathf.Clamp(v, 0.25f, 20), 0.5f, "0.0#");
-            StepRow(ref y, "Jump height x", () => Cheats.JumpMult, v => Cheats.JumpMult = Mathf.Clamp(v, 0.25f, 20), 0.5f, "0.0#");
-            ToggleRow(ref y, "Unlimited jetpack", () => Cheats.InfiniteJetpack, v => Cheats.InfiniteJetpack = v);
-            ToggleRow(ref y, "Gravity boots", () => Cheats.GravityBoots, v => Cheats.GravityBoots = v);
-            ToggleRow(ref y, "Night vision", () => Cheats.NightVision, v => Cheats.NightVision = v);
-            ButtonRow(ref y, new[] { "Refill jetpack + energy", "Max all my upgrades" }, new Func<string>[] {
-                () => Cheats.RefillAll(), () => Game.GiveAllUpgrades(Game.PlayerId) });
-        }
-
-        void MoneySection(ref float y)
-        {
-            float inner = W - Pad * 2;
-            var money = Text(_scrollContent, "", 0, y, inner, Row, 18, false, Cream, TextAlignmentOptions.MidlineLeft); y += Row;
-            _refreshers.Add(() => money.text = "Team wallet  <b>$" + Game.Money(Game.PlayerId).ToString("N0") + "</b>");
-            ButtonRow(ref y, new[] { "+1k", "+10k", "+100k", "+1M" }, new Func<string>[] {
-                () => AddMoney(1000), () => AddMoney(10000), () => AddMoney(100000), () => AddMoney(1000000) });
-            ButtonRow(ref y, new[] { "Set 0", "Set 100k", "Set 10M" }, new Func<string>[] {
-                () => SetMoney(0), () => SetMoney(100000), () => SetMoney(10000000) });
-            StepRow(ref y, "Earnings x", () => Cheats.PayoutMult, v => Cheats.PayoutMult = Mathf.Clamp(v, 0.25f, 100), 1f, "0.0#");
-            ToggleRow(ref y, "Free upgrades & tools", () => Cheats.FreeUpgrades, v => Cheats.FreeUpgrades = v);
-            ToggleRow(ref y, "Free station travel", () => Cheats.FreeTravel, v => Cheats.FreeTravel = v);
-        }
-
-        void DustSection(ref float y)
-        {
-            ToggleRow(ref y, "Unlimited bag capacity", () => Cheats.InfiniteBag, v => Cheats.InfiniteBag = v);
-            ToggleRow(ref y, "Auto-sell what I collect (experimental)", () => Cheats.AutoSell, v => Cheats.AutoSell = v);
-            ButtonRow(ref y, new[] { "Fill my bag", "Empty my bag", "Sell bag now" }, new Func<string>[] {
-                () => Cheats.SetCarried(true), () => Cheats.SetCarried(false), () => Cheats.SellCarried(true) });
-            StepRow(ref y, "Vehicle speed x", () => Cheats.VehicleSpeedMult, v => Cheats.VehicleSpeedMult = Mathf.Clamp(v, 0.25f, 20), 0.5f, "0.0#");
-            StepRow(ref y, "Brush width x", () => Cheats.BrushWidthMult, v => Cheats.BrushWidthMult = Mathf.Clamp(v, 0.25f, 20), 0.5f, "0.0#");
-            ToggleRow(ref y, "Unlimited vehicle hopper", () => Cheats.InfiniteHopper, v => Cheats.InfiniteHopper = v);
-            ButtonRow(ref y, new[] { "Fill hopper", "Empty hopper" }, new Func<string>[] {
-                () => Cheats.SetHopper(true), () => Cheats.SetHopper(false) });
-        }
-
-        void WorldSection(ref float y)
-        {
-            float inner = W - Pad * 2;
-            var time = Text(_scrollContent, "", 0, y, inner, Row - 6, 15, false, Dim, TextAlignmentOptions.MidlineLeft); y += Row - 6;
-            _refreshers.Add(() => time.text = "Lunar time " + Cheats.TimeText());
-            ToggleRow(ref y, "Freeze time of day", () => Cheats.FreezeTime, v => Cheats.FreezeTime = v);
-            StepRow(ref y, "Time speed x", () => Cheats.TimeSpeed, v => Cheats.TimeSpeed = Mathf.Clamp(Mathf.Round(v * 4) / 4, 0.25f, 50), Cheats.TimeSpeed >= 5 ? 5f : 0.25f, "0.##");
-            ButtonRow(ref y, new[] { "-1 h", "+1 h", "+6 h", "+12 h" }, new Func<string>[] {
-                () => Cheats.ShiftTime(-1), () => Cheats.ShiftTime(1), () => Cheats.ShiftTime(6), () => Cheats.ShiftTime(12) });
-            StepRow(ref y, "Machine speed x", () => Cheats.MachineSpeed, v => Cheats.MachineSpeed = Mathf.Clamp(v, 0.25f, 50), 1f, "0.0#");
-            RingRow(ref y);
-            ActionRow(ref y, "Finish the Moon - leave 1 section (marker set)", () => Cheats.FinishMoon(true));
-            ConfirmRow(ref y, "finish", "Finish the Moon completely", () => Cheats.FinishMoon(false));
-            ConfirmRow(ref y, "resetdust", "Reset all dust (undo cleaning)", () => Cheats.ResetDust(), true);
-            ActionRow(ref y, "Save game now", () => Game.SaveNow());
-        }
-
-        void LandmarkSection(ref float y)
-        {
-            ToggleRow(ref y, "Show flags & sites on the map", () => Cheats.FlagsOnMap, v => Cheats.FlagsOnMap = v);
-            LandmarkBrowser(ref y, "Flag", _flags, () => _flagPos, v => _flagPos = v, MoonLandmarkKind.Flag);
-            LandmarkBrowser(ref y, "Site", _sites, () => _sitePos, v => _sitePos = v, MoonLandmarkKind.Site);
-            ButtonRow(ref y, new[] { "Raise all flags", "Find all sites", "Both" }, new Func<string>[] {
+            var a = Card(ref y, "Everything at once");
+            Buttons(ref y, new[] { "Raise all flags", "Find all sites", "Both" }, new Func<string>[] {
                 () => Done(Cheats.RaiseLandmarks(MoonLandmarkKind.Flag)), () => Done(Cheats.RaiseLandmarks(MoonLandmarkKind.Site)), () => Done(Cheats.RaiseLandmarks(null)) });
+            EndCard(a, ref y);
         }
 
-        /// <summary>"◀ name ▶" browser over unraised landmarks, nearest first, with Go and Raise buttons.</summary>
-        void LandmarkBrowser(ref float y, string label, List<int> list, Func<int> getPos, Action<int> setPos, MoonLandmarkKind kind)
+        /// <summary>"< name >" browser over unraised landmarks, nearest first, with Go and Raise buttons.</summary>
+        [HideFromIl2Cpp]
+        void Browser(ref float y, string label, List<int> list, Func<int> getPos, Action<int> setPos)
         {
-            float inner = W - Pad * 2, btn = 40, act = 64;
             var world = Game.World;
-            if (list.Count == 0)
-            {
-                Text(_scrollContent, "All " + label.ToLower() + "s raised.", 0, y, inner, Row, 14, false, Dim, TextAlignmentOptions.MidlineLeft);
-                y += Row + Gap; return;
-            }
+            if (list.Count == 0) { Hint(ref y, "All " + label.ToLower() + "s raised."); return; }
             Func<string> name = () =>
             {
                 if (list.Count == 0 || world == null) return "-";
                 var lm = world.Landmark(list[getPos()]);
-                return label + " " + (getPos() + 1) + "/" + list.Count + ":  <b>" + (lm != null ? lm.name : "?") + "</b>";
+                return (lm != null ? lm.name : "?") + "   <color=#8B91A0><size=12>" + (getPos() + 1) + " of " + list.Count + (getPos() == 0 ? " - nearest" : "") + "</size></color>";
             };
-            ButtonRaw(_scrollContent, "<", 0, y, btn, Row, () => { setPos((getPos() - 1 + list.Count) % list.Count); return name(); }, TextAlignmentOptions.Center);
-            var text = Text(_scrollContent, "", btn + Gap, y, inner - btn * 2 - act * 2 - Gap * 4, Row, 14, false, Cream, TextAlignmentOptions.MidlineLeft);
-            ButtonRaw(_scrollContent, ">", inner - act * 2 - btn - Gap * 2, y, btn, Row, () => { setPos((getPos() + 1) % list.Count); return name(); }, TextAlignmentOptions.Center);
-            ButtonRaw(_scrollContent, "Go", inner - act * 2 - Gap, y, act, Row, () => Cheats.TeleportToLandmark(list[getPos()]), TextAlignmentOptions.Center);
-            ButtonRaw(_scrollContent, "Raise", inner - act, y, act, Row, () =>
+            float arrow = 38, act = 74;
+            SmallButton(_x, y, arrow, "<", () => { setPos((getPos() - 1 + list.Count) % list.Count); return null; });
+            var text = Text(_page, "", _x + arrow + 10, y, _w - arrow * 2 - act * 2 - 40, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            SmallButton(_x + _w - act * 2 - arrow - 16, y, arrow, ">", () => { setPos((getPos() + 1) % list.Count); return null; });
+            SmallButton(_x + _w - act * 2 - 8, y, act, "Go", () => Cheats.TeleportToLandmark(list[getPos()]), Accent);
+            SmallButton(_x + _w - act, y, act, "Raise", () =>
             {
                 var w = Game.World; if (w == null) return "Not in a game.";
                 w.MarkLandmarkRaised(list[getPos()], Game.PlayerId); Game.MarkDirty();
                 _rebuildPending = true;
                 return label + " raised.";
-            }, TextAlignmentOptions.Center);
+            });
             _refreshers.Add(() => text.text = name());
-            y += Row + Gap;
+            y += BtnH + Gap;
         }
 
-        void TeleportSection(ref float y)
+        [HideFromIl2Cpp]
+        void TeleportPage(ref float y)
         {
-            float inner = W - Pad * 2;
-            ButtonRow(ref y, new[] { "Nearest flag", "Nearest site" }, new Func<string>[] {
-                () => Cheats.TeleportToNearestLandmark(MoonLandmarkKind.Flag), () => Cheats.TeleportToNearestLandmark(MoonLandmarkKind.Site) });
+            var q = Card(ref y, "Landmarks");
+            Buttons(ref y, new[] { "Nearest flag", "Nearest site" }, new Func<string>[] {
+                () => Cheats.TeleportToNearestLandmark(MoonLandmarkKind.Flag), () => Cheats.TeleportToNearestLandmark(MoonLandmarkKind.Site) }, Accent);
+            EndCard(q, ref y);
 
-            SubHeader(ref y, "Map markers");
             var world = Game.World;
             int count = world == null || world.waypoints == null ? 0 : world.waypoints.Count;
+            var mk = Card(ref y, "Map markers (" + count + ")");
             if (count == 0) Hint(ref y, "No markers. Right-click the map to place one.");
             for (int i = 0; i < count; i++)
             {
                 int index = i;
-                var mark = world.waypoints[i];
-                ButtonRaw(_scrollContent, "Marker " + (i + 1) + "   <size=12><color=#A09C96>#" + mark.id + "</color></size>", 0, y, inner, Row,
-                    () => Cheats.TeleportToWaypoint(index), TextAlignmentOptions.MidlineLeft);
-                y += Row + Gap;
+                ListRow(ref y, "Marker " + (i + 1), "#" + world.waypoints[i].id, "Go", () => Cheats.TeleportToWaypoint(index));
             }
+            EndCard(mk, ref y);
 
-            SubHeader(ref y, "Crewmates");
             var remotes = Game.RemotePlayers();
-            if (remotes.Count == 0) Hint(ref y, "No crewmates in range. Players show up here once they're on the Moon with you.");
+            var cm = Card(ref y, "Crewmates (" + remotes.Count + ")");
+            if (remotes.Count == 0) Hint(ref y, "Crewmates show up here once they're on the Moon with you.");
             foreach (var rp in remotes)
             {
                 string n = rp.DisplayName;
-                ButtonRaw(_scrollContent, "Go to " + n, 0, y, inner, Row, () => Cheats.TeleportToPlayer(n), TextAlignmentOptions.MidlineLeft);
-                y += Row + Gap;
+                ListRow(ref y, n, null, "Go", () => Cheats.TeleportToPlayer(n));
             }
+            EndCard(cm, ref y);
         }
 
-        void BuildSection(ref float y)
+        [HideFromIl2Cpp]
+        void LocationsPage(ref float y)
         {
-            Hint(ref y, "Look at the ground where you want it (within 250 m), then click.");
-            ActionRow(ref y, "Place dust catcher", () => Cheats.PlaceCatcher());
-            ButtonRow(ref y, new[] { "Robot dock Mk I", "Mk II", "Joonas" }, new Func<string>[] {
-                () => Cheats.PlaceRobotDock(0, "Mk I"), () => Cheats.PlaceRobotDock(1, "Mk II"), () => Cheats.PlaceRobotDock(2, "Joonas") });
-        }
+            var a = Card(ref y, null);
+            Buttons(ref y, new[] { "Save where I'm standing" }, new Func<string>[] { () => { _rebuildPending = true; return Locations.SaveHere(null); } }, Accent);
+            Hint(ref y, "Named after the nearest landmark. In chat: " + Settings.ChatPrefix.Value + "save base   then   " + Settings.ChatPrefix.Value + "go base");
+            EndCard(a, ref y);
 
-        void CrewSection(ref float y)
-        {
-            float inner = W - Pad * 2;
-            TMP_Text who = ButtonRaw(_scrollContent, "", 0, y, inner, Row, () => { _memberIndex = (_memberIndex + 1) % Math.Max(1, _members.Count); return "Selected " + CurrentMember().Name; }, TextAlignmentOptions.MidlineLeft);
-            _refreshers.Add(() => who.text = "Player:  <b>" + CurrentMember().Name + "</b>   <size=12><color=#A09C96>(click to cycle)</color></size>");
-            y += Row + Gap;
-            ButtonRow(ref y, new[] { "+10k", "+100k", "+1M" }, new Func<string>[] {
-                () => Give(10000), () => Give(100000), () => Give(1000000) });
-            ButtonRow(ref y, new[] { "Jetpack", "Boots", "Night vis", "Belt" }, new Func<string>[] {
-                () => GiveUp("gear.jetpack"), () => GiveUp("gear.boots"), () => GiveUp("gear.nightvision"), () => GiveUp("gear.belt") });
-            ButtonRow(ref y, new[] { "Speed", "Jump", "Width", "Payout" }, new Func<string>[] {
-                () => GiveUp("suit.stride"), () => GiveUp("suit.jump"), () => GiveUp("clean.width"), () => GiveUp("eco.payout") });
-            ButtonRow(ref y, new[] { "Max every upgrade", "Raise all flags & sites" }, new Func<string>[] {
-                () => Game.GiveAllUpgrades(CurrentMember().Id), () => Done(Cheats.RaiseLandmarks(null, CurrentMember().Id)) });
-            Hint(ref y, "Money goes to the shared team wallet. Upgrades, flags and sites are per player.");
-            SubHeader(ref y, "Who has the trainer");
-            foreach (var m in _members)
-            {
-                var mm = m;
-                var t = Text(_scrollContent, "", 0, y, inner - 110 - Gap, Row - 6, 14, false, Cream, TextAlignmentOptions.MidlineLeft);
-                _refreshers.Add(() => t.text = VersionLine(mm));
-                if (!m.Local)
-                    ButtonRaw(_scrollContent, "Send link", inner - 110, y, 110, Row - 6, () =>
-                    {
-                        Chat.SayInstall(mm.Name);
-                        return "Link posted in chat for " + mm.Name + ".";
-                    }, TextAlignmentOptions.Center);
-                y += Row - 6 + Gap;
-            }
-        }
-
-        void ChatSection(ref float y)
-        {
-            ToggleRow(ref y, "Crew may use chat commands", () => Settings.ChatCommands.Value, v => Settings.ChatCommands.Value = v);
-            ToggleRow(ref y, "...including money, upgrades, flags", () => Settings.ChatGiveables.Value, v => Settings.ChatGiveables.Value = v);
-            ToggleRow(ref y, "Only allowlisted players", () => Settings.ChatAllowlistOnly.Value, v => Settings.ChatAllowlistOnly.Value = v);
-            foreach (var m in _members)
-            {
-                if (m.Local) continue;
-                string n = m.Name;
-                ToggleRow(ref y, "   Allow " + n, () => Settings.OnAllowlist(n), v => Settings.SetAllowlisted(n, v));
-            }
-            StepRow(ref y, "Cooldown (seconds)", () => Settings.ChatCooldown.Value, v => Settings.ChatCooldown.Value = Mathf.Clamp(v, 0, 60), 1f, "0");
-            StepRow(ref y, "Money limit per player ($k)", () => Settings.ChatSessionMoneyCap.Value / 1000f, v => Settings.ChatSessionMoneyCap.Value = Mathf.Clamp(v, 0, 1000000) * 1000f, 1000f, "N0");
-            ToggleRow(ref y, "Welcome message when someone joins", () => Settings.ChatWelcome.Value, v => Settings.ChatWelcome.Value = v);
-            ToggleRow(ref y, "Reply in chat", () => Settings.ChatReply.Value, v => Settings.ChatReply.Value = v);
-            Hint(ref y, Settings.ChatPrefix.Value + Chat.Help, 52);
-        }
-
-        void LocationsSection(ref float y)
-        {
-            float inner = W - Pad * 2, small = 70;
-            ActionRow(ref y, "Save where I'm standing", () => Locations.SaveHere(null));
             var spots = Locations.All();
-            if (spots.Count == 0) Hint(ref y, "Nothing saved yet. Tip: type " + Settings.ChatPrefix.Value + "save base in chat to save a spot with your own name, and " + Settings.ChatPrefix.Value + "go base to come back.");
+            var l = Card(ref y, "Saved (" + spots.Count + ")");
+            if (spots.Count == 0) Hint(ref y, "Nothing saved on this save yet.");
             foreach (var spot in spots)
             {
                 string n = spot.Name;
-                ButtonRaw(_scrollContent, n, 0, y, inner - small - Gap, Row, () => Locations.Go(n), TextAlignmentOptions.MidlineLeft);
-                ButtonRaw(_scrollContent, "Delete", inner - small, y, small, Row, () => { _rebuildPending = true; return Locations.Delete(n); }, TextAlignmentOptions.Center, Danger);
-                y += Row + Gap;
+                ListRow(ref y, n, null, "Go", () => Locations.Go(n), "Delete", () => { _rebuildPending = true; return Locations.Delete(n); });
             }
+            EndCard(l, ref y);
         }
 
-        void BackupsSection(ref float y)
+        [HideFromIl2Cpp]
+        void BuildPage(ref float y)
         {
-            float inner = W - Pad * 2, small = 84;
-            ActionRow(ref y, "Make a backup now", () => { _rebuildPendingAt = Time.unscaledTime + 6f; return Game.BackupNow(); });
-            Hint(ref y, "The game keeps its own rolling backups too. Restoring backs up your current state first, then reloads the shift.", 30);
-            if (_backups.Count == 0) Hint(ref y, "No backups for this save yet.", 22);
+            var c = Card(ref y, "Place where you're looking");
+            Hint(ref y, "Aim at the ground within 250 m, then click.");
+            Buttons(ref y, new[] { "Dust catcher" }, new Func<string>[] { () => Cheats.PlaceCatcher() }, Accent);
+            Buttons(ref y, new[] { "Robot dock Mk I", "Mk II", "Joonas" }, new Func<string>[] {
+                () => Cheats.PlaceRobotDock(0, "Mk I"), () => Cheats.PlaceRobotDock(1, "Mk II"), () => Cheats.PlaceRobotDock(2, "Joonas") });
+            EndCard(c, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void CrewPage(ref float y)
+        {
+            var s = Card(ref y, "Give to");
+            var pick = Buttons(ref y, new[] { "" }, new Func<string>[] { () => { _memberIndex = (_memberIndex + 1) % Math.Max(1, _members.Count); return null; } });
+            _refreshers.Add(() => pick[0].text = CurrentMember().Name + "   <color=#8B91A0><size=12>click to change</size></color>");
+            Buttons(ref y, new[] { "+10k", "+100k", "+1M" }, new Func<string>[] { () => Give(10000), () => Give(100000), () => Give(1000000) }, Accent);
+            Buttons(ref y, new[] { "Jetpack", "Boots", "Night vis", "Belt" }, new Func<string>[] {
+                () => GiveUp("gear.jetpack"), () => GiveUp("gear.boots"), () => GiveUp("gear.nightvision"), () => GiveUp("gear.belt") });
+            Buttons(ref y, new[] { "Speed", "Jump", "Width", "Payout" }, new Func<string>[] {
+                () => GiveUp("suit.stride"), () => GiveUp("suit.jump"), () => GiveUp("clean.width"), () => GiveUp("eco.payout") });
+            Buttons(ref y, new[] { "Max every upgrade", "All flags & sites" }, new Func<string>[] {
+                () => Game.GiveAllUpgrades(CurrentMember().Id), () => Done(Cheats.RaiseLandmarks(null, CurrentMember().Id)) });
+            Hint(ref y, "Money goes to the shared team wallet. Upgrades, flags and sites are per player.");
+            EndCard(s, ref y);
+
+            var w = Card(ref y, "Who has the trainer");
+            foreach (var m in _members)
+            {
+                var mm = m;
+                var name = Text(_page, mm.Name + (mm.Local ? "  <color=#8B91A0><size=12>you</size></color>" : ""), _x, y, _w - 230, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                var chip = Box(_page, "Chip", _x + _w - 220, y + 7, 120, 22, Off, pill: true);
+                var chipText = Text(chip.transform, "", 0, 0, 120, 22, 11, true, Cream, TextAlignmentOptions.Center);
+                float nextPoll = 0;
+                _refreshers.Add(() =>
+                {
+                    if (Time.unscaledTime < nextPoll) return;
+                    nextPoll = Time.unscaledTime + 2f;
+                    string v = Game.TrainerVersionOf(mm);
+                    string latest = Updates.Latest ?? Plugin.Version;
+                    if (Updates.IsNewer(Plugin.Version, latest)) latest = Plugin.Version;
+                    if (v == null) { chip.color = Off; chipText.text = "NOT DETECTED"; }
+                    else if (Updates.IsNewer(latest, v)) { chip.color = Hex("8A5A12"); chipText.text = "v" + v + "  OLD"; }
+                    else { chip.color = Hex("1F5A38"); chipText.text = "v" + v; }
+                });
+                if (!mm.Local) SmallButton(_x + _w - 90, y, 90, "Send link", () => { Chat.SayInstall(mm.Name); return "Install link posted in chat for " + mm.Name + "."; });
+                y += BtnH + Gap;
+            }
+            Hint(ref y, "Not detected = no trainer, or version 1.0 (which didn't report itself).");
+            EndCard(w, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void ChatPage(ref float y)
+        {
+            var p = Card(ref y, "Permissions");
+            Switch(ref y, "Crew may use chat commands", null, () => Settings.ChatCommands.Value, v => Settings.ChatCommands.Value = v);
+            Switch(ref y, "Including money, upgrades, flags", null, () => Settings.ChatGiveables.Value, v => Settings.ChatGiveables.Value = v);
+            Switch(ref y, "Only allowlisted players", null, () => Settings.ChatAllowlistOnly.Value, v => Settings.ChatAllowlistOnly.Value = v);
+            foreach (var m in _members)
+            {
+                if (m.Local) continue;
+                string n = m.Name; ulong id = m.SteamId;
+                Switch(ref y, "Allow " + n, null, () => Settings.OnAllowlist(n, id, false), v => Settings.SetAllowlisted(n, id, v));
+            }
+            EndCard(p, ref y);
+
+            var l = Card(ref y, "Limits");
+            Stepper(ref y, "Cooldown", () => Settings.ChatCooldown.Value, v => Settings.ChatCooldown.Value = Mathf.Clamp(v, 0, 60), 1f, "0", " s");
+            Stepper(ref y, "Money per player", () => Settings.ChatSessionMoneyCap.Value / 1000f, v => Settings.ChatSessionMoneyCap.Value = Mathf.Clamp(v, 0, 1000000) * 1000f, 1000f, "N0", "k");
+            EndCard(l, ref y);
+
+            var o = Card(ref y, "Messages");
+            Switch(ref y, "Welcome people who join", null, () => Settings.ChatWelcome.Value, v => Settings.ChatWelcome.Value = v);
+            Switch(ref y, "Reply in chat", null, () => Settings.ChatReply.Value, v => Settings.ChatReply.Value = v);
+            EndCard(o, ref y);
+
+            var c = Card(ref y, "Commands");
+            var t = Hint(ref y, Settings.ChatPrefix.Value + Chat.Help.Replace(", ", "   " + Settings.ChatPrefix.Value), 64);
+            EndCard(c, ref y);
+        }
+
+        [HideFromIl2Cpp]
+        void BackupsPage(ref float y)
+        {
+            _backups = Game.Backups();
+            var a = Card(ref y, null);
+            Buttons(ref y, new[] { "Make a backup now" }, new Func<string>[] { () => { _rebuildPendingAt = Time.unscaledTime + 6f; return Game.BackupNow(); } }, Accent);
+            Hint(ref y, "Restoring backs up your current state first, then reloads the shift. Host only.");
+            EndCard(a, ref y);
+
+            var l = Card(ref y, "Recent backups (" + _backups.Count + ")");
+            if (_backups.Count == 0) Hint(ref y, "No backups for this save yet.");
             int shown = 0;
             foreach (var b in _backups)
             {
-                if (shown++ >= 8) break;
+                if (shown++ >= 10) break;
                 string manifest = b;
-                Text(_scrollContent, Game.BackupLabel(b), 0, y, inner - small - Gap, Row, 15, false, Cream, TextAlignmentOptions.MidlineLeft);
-                ConfirmButton(inner - small, y, small, "restore:" + manifest, "Restore", () => Game.RestoreBackup(manifest));
-                y += Row + Gap;
+                Text(_page, Game.BackupLabel(b), _x, y, _w - 120, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                ConfirmSmall(_x + _w - 100, y, 100, "restore:" + manifest, "Restore", () => Game.RestoreBackup(manifest));
+                y += BtnH + Gap;
             }
+            EndCard(l, ref y);
         }
 
-        void SettingsSection(ref float y)
+        [HideFromIl2Cpp]
+        void SettingsPage(ref float y)
         {
-            ToggleRow(ref y, "Remember toggles between launches", () => Settings.RememberCheats.Value, v => Settings.RememberCheats.Value = v);
-            ToggleRow(ref y, "Show active cheats on screen", () => Settings.ShowHud.Value, v => Settings.ShowHud.Value = v);
-            ToggleRow(ref y, "Check for updates at startup", () => Settings.CheckForUpdates.Value, v => Settings.CheckForUpdates.Value = v);
-            Hint(ref y, "Hotkeys (change in MODS > Moon Trainer > Settings):  fly " + Settings.FlyKey.Value + "  ·  noclip " + Settings.NoclipKey.Value
-                + "  ·  speed " + Settings.SpeedKey.Value + "  ·  jetpack " + Settings.JetpackKey.Value + "  ·  save " + Settings.SaveKey.Value + "  ·  HUD " + Settings.HudKey.Value, 40);
-            ConfirmRow(ref y, "achievements", "Unlock all Steam achievements", () => Cheats.UnlockAchievements(), true);
-            ActionRow(ref y, "Reset menu position", () =>
+            var g = Card(ref y, "General");
+            Switch(ref y, "Remember toggles between launches", null, () => Settings.RememberCheats.Value, v => Settings.RememberCheats.Value = v);
+            Switch(ref y, "Show active cheats on screen", null, () => Settings.ShowHud.Value, v => Settings.ShowHud.Value = v);
+            Switch(ref y, "Check for updates at startup", null, () => Settings.CheckForUpdates.Value, v => Settings.CheckForUpdates.Value = v);
+            EndCard(g, ref y);
+
+            var k = Card(ref y, "Hotkeys");
+            KeyRow(ref y, "Open menu", Settings.MenuKey.Value);
+            KeyRow(ref y, "Fly", Settings.FlyKey.Value);
+            KeyRow(ref y, "No clip", Settings.NoclipKey.Value);
+            KeyRow(ref y, "Speed boost", Settings.SpeedKey.Value);
+            KeyRow(ref y, "Unlimited jetpack", Settings.JetpackKey.Value);
+            KeyRow(ref y, "Save game", Settings.SaveKey.Value);
+            KeyRow(ref y, "Show / hide active line", Settings.HudKey.Value);
+            Hint(ref y, "Change them in the game's MODS screen > Moon Trainer > Settings.");
+            EndCard(k, ref y);
+
+            var o = Card(ref y, "Other");
+            Buttons(ref y, new[] { "Reset menu position" }, new Func<string>[] { () =>
             {
-                Settings.MenuX.Value = 32; Settings.MenuY.Value = -40;
-                _panel.anchoredPosition = new Vector2(32, -40);
+                Settings.MenuX.Value = 60; Settings.MenuY.Value = -60;
+                _panel.anchoredPosition = new Vector2(60, -60);
                 return "Menu moved back.";
-            });
+            } });
+            Confirm(ref y, "achievements", "Unlock all Steam achievements", () => Cheats.UnlockAchievements(), true);
+            EndCard(o, ref y);
         }
 
-        static string VersionLine(Game.Member m)
+        /// <summary>On a crewmate's PC, says plainly that these buttons act on things the host's game owns.</summary>
+        [HideFromIl2Cpp]
+        void HostOnly(ref float y, string what)
         {
-            string latest = Updates.Latest ?? Plugin.Version;
-            if (Updates.IsNewer(Plugin.Version, latest)) latest = Plugin.Version;
-            string v = Game.TrainerVersionOf(m);
-            string name = m.Name + (m.Local ? " (you)" : "");
-            if (v == null) return name + "   <color=#A09C96>not detected - no trainer, or 1.0</color>";
-            if (Updates.IsNewer(latest, v)) return name + "   <color=#FFB347>v" + v + " - out of date</color>";
-            return name + "   <color=#7FD48A>v" + v + "</color>";
+            if (!Game.IsCrewmate) return;
+            var c = Card(ref y, null, Hex("3A2412"));
+            Hint(ref y, "<color=#FF8C33>You're not the host of this lobby.</color>  The host's game owns " + what
+                + ", so these buttons may do nothing here or be undone. Ask the host to do it, or use the chat commands.").color = Cream;
+            EndCard(c, ref y);
         }
 
+        [HideFromIl2Cpp]
         Game.Member CurrentMember() { return _members.Count == 0 ? new Game.Member { Id = Game.PlayerId, Name = "You", Local = true } : _members[_memberIndex]; }
 
-        string AddMoney(double d) { var b = Game.AddMoney(Game.PlayerId, d); return "+$" + d.ToString("N0") + " (now $" + b.ToString("N0") + ")"; }
-        string SetMoney(double d) { var b = Game.SetMoney(Game.PlayerId, d); return "Money set to $" + b.ToString("N0"); }
-        string Give(double d) { var m = CurrentMember(); var b = Game.AddMoney(m.Id, d); return "+$" + d.ToString("N0") + " for " + m.Name + " (team now $" + b.ToString("N0") + ")"; }
+        [HideFromIl2Cpp]
+        string AddMoney(double d) { var b = Game.AddMoney(Game.PlayerId, d); return "+$" + d.ToString("N0") + "  (now $" + b.ToString("N0") + ")"; }
+        [HideFromIl2Cpp]
+        string SetMoney(double d) { var b = Game.SetMoney(Game.PlayerId, d); return "Wallet set to $" + b.ToString("N0"); }
+        [HideFromIl2Cpp]
+        string Give(double d) { var m = CurrentMember(); var b = Game.AddMoney(m.Id, d); return "+$" + d.ToString("N0") + " for " + m.Name + "  (team now $" + b.ToString("N0") + ")"; }
+        [HideFromIl2Cpp]
         string GiveUp(string id) { var m = CurrentMember(); return m.Name + ": " + Game.GiveUpgrade(m.Id, id); }
+        [HideFromIl2Cpp]
         string Done(string msg) { _rebuildPending = true; return msg; }
 
         // ---- refresh -----------------------------------------------------------------------------------
 
+        [HideFromIl2Cpp]
         void Refresh()
         {
-            _nextRefresh = Time.unscaledTime + 0.25f;
+            _nextRefresh = Time.unscaledTime + 0.2f;
+            foreach (var r in _chrome) { try { r(); } catch (Exception) { } }
             foreach (var r in _refreshers) { try { r(); } catch (Exception) { } }
-            if (_status != null && Time.unscaledTime >= _statusUntil) _status.text = _notice != null && Time.unscaledTime < _noticeUntil ? _notice : "";
 
             var world = Game.World;
-            if (world != null && (world.WaypointRevision != _waypointRevision || world.LandmarkRevision != _landmarkRevision)) _rebuildPending = true;
-            if ((Updates.Available != null) != _updateShown) _rebuildPending = true;
-            if (Locations.All().Count != _locationCount) _rebuildPending = true;
+            if (world != null && (world.WaypointRevision != _waypointRevision || world.LandmarkRevision != _landmarkRevision)
+                && (_tab == "Teleport" || _tab == "Flags & Sites")) _rebuildPending = true;
+            if ((Updates.Available != null) != _updateShown && _tab == "Home") _rebuildPending = true;
+            if (_tab == "Locations" && Locations.All().Count != _locationCount) _rebuildPending = true;
+        }
+
+        [HideFromIl2Cpp]
+        void Toast(string message)
+        {
+            if (string.IsNullOrEmpty(message) || _toastText == null) return;
+            _toastText.text = message;
+            _toastUntil = Time.unscaledTime + 4f;
+            _noticeShownUntil = _noticeUntil;
+            Plugin.Logger.LogInfo(message);
+        }
+
+        float _noticeShownUntil;
+
+        [HideFromIl2Cpp]
+        void UpdateToast()
+        {
+            if (_toastText == null || _toastRt == null) return;
+            // Show trainer notices (e.g. from chat commands or hotkeys) in the toast while the menu is open.
+            if (_notice != null && _noticeUntil != _noticeShownUntil && Time.unscaledTime < _noticeUntil)
+            {
+                _noticeShownUntil = _noticeUntil;
+                _toastText.text = _notice;
+                _toastUntil = Mathf.Max(_toastUntil, _noticeUntil - 1f);
+            }
+            bool show = Time.unscaledTime < _toastUntil;
+            if (_toastGroup == null) { if (_toastRt.gameObject.activeSelf != show) _toastRt.gameObject.SetActive(show); return; }
+            _toastGroup.alpha = Mathf.MoveTowards(_toastGroup.alpha, show ? 1f : 0f, Time.unscaledDeltaTime * 6f);
         }
 
         // ---- widgets ---------------------------------------------------------------------------------
 
-        /// <summary>Clickable section header; returns true when the section is expanded.</summary>
-        bool Section(ref float y, string title)
+        struct CardInfo { public RectTransform Bg; public float Top; }
+
+        /// <summary>Starts a card (optional small-caps title above it). Widgets go inside until EndCard.</summary>
+        [HideFromIl2Cpp]
+        CardInfo Card(ref float y, string title, Color? color = null)
         {
-            float inner = W - Pad * 2;
-            bool collapsed = Settings.IsCollapsed(title);
+            if (title != null)
+            {
+                var t = Text(_page, title.ToUpper(), CP + 2, y, CW, 18, 11, true, Faint, TextAlignmentOptions.BottomLeft);
+                t.characterSpacing = 4;
+                y += 24;
+            }
+            var bg = Box(_page, "Card", CP, y, CW, 10, color ?? CardBg, 12);
+            var info = new CardInfo { Bg = bg.rectTransform, Top = y };
+            y += 14;
+            _x = CP + 16; _w = CW - 32;
+            return info;
+        }
+
+        [HideFromIl2Cpp]
+        void EndCard(CardInfo c, ref float y)
+        {
             y += 6;
-            var t = ButtonRaw(_scrollContent, (collapsed ? "+  " : "-  ") + title, 0, y, inner, 30, () =>
-            {
-                Settings.SetCollapsed(title, !Settings.IsCollapsed(title));
-                _rebuildPending = true;
-                return null;
-            }, TextAlignmentOptions.MidlineLeft, HeaderColor);
-            t.color = Accent; t.fontSize = 15;
-            y += 30 + Gap;
-            return !collapsed;
+            c.Bg.sizeDelta = new Vector2(CW, y - c.Top);
+            y += 18;
+            _x = CP; _w = CW;
         }
 
-        void SubHeader(ref float y, string title)
+        [HideFromIl2Cpp]
+        TMP_Text Label(ref float y, string text, float size, bool bold)
         {
-            Text(_scrollContent, title.ToUpper(), 0, y, W - Pad * 2, 22, 12, true, Dim, TextAlignmentOptions.BottomLeft);
-            y += 24;
+            var t = Text(_page, text, _x, y, _w, 28, size, bold, Cream, TextAlignmentOptions.MidlineLeft);
+            y += 32;
+            return t;
         }
 
-        void Hint(ref float y, string text, float h = 34)
+        [HideFromIl2Cpp]
+        TMP_Text Hint(ref float y, string text, float h = 0)
         {
-            var t = Text(_scrollContent, text, 0, y, W - Pad * 2, h, 12, false, Dim, TextAlignmentOptions.TopLeft);
+            var t = Text(_page, text, _x, y, _w, 20, 12, false, Dim, TextAlignmentOptions.TopLeft);
             t.textWrappingMode = TextWrappingModes.Normal;
-            y += h + 2;
-        }
-
-        void ToggleRow(ref float y, string label, Func<bool> get, Action<bool> set)
-        {
-            float inner = W - Pad * 2;
-            TMP_Text text = null;
-            text = ButtonRaw(_scrollContent, "", 0, y, inner, Row, () => { set(!get()); return label.Trim() + " " + (get() ? "on" : "off"); }, TextAlignmentOptions.MidlineLeft);
-            _refreshers.Add(() => text.text = label + "   " + (get() ? "<color=#FF8C33><b>ON</b></color>" : "<color=#A09C96>OFF</color>"));
-            y += Row + Gap;
-        }
-
-        void StepRow(ref float y, string label, Func<float> get, Action<float> set, float step, string fmt)
-        {
-            float inner = W - Pad * 2;
-            float btn = 44;
-            var text = Text(_scrollContent, "", 0, y, inner - btn * 2 - Gap * 2, Row, 16, false, Cream, TextAlignmentOptions.MidlineLeft);
-            ButtonRaw(_scrollContent, "-", inner - btn * 2 - Gap, y, btn, Row, () => { set(get() - step); return label + " " + get().ToString(fmt); }, TextAlignmentOptions.Center);
-            ButtonRaw(_scrollContent, "+", inner - btn, y, btn, Row, () => { set(get() + step); return label + " " + get().ToString(fmt); }, TextAlignmentOptions.Center);
-            _refreshers.Add(() => text.text = label + "   <b>" + get().ToString(fmt) + "</b>");
-            y += Row + Gap;
-        }
-
-        /// <summary>Rings to clean around the player: -10 / -1 / value / +1 / +10, then one button that does it.</summary>
-        void RingRow(ref float y)
-        {
-            float inner = W - Pad * 2;
-            float btn = 44;
-            Func<string> show = () => "Clean radius   <b>" + Cheats.CleanRings + "</b> rings";
-            Action<int> bump = d => Cheats.CleanRings = Mathf.Clamp(Cheats.CleanRings + d, 1, 60);
-            ButtonRaw(_scrollContent, "-10", 0, y, btn, Row, () => { bump(-10); return show(); }, TextAlignmentOptions.Center);
-            ButtonRaw(_scrollContent, "-", btn + Gap, y, btn, Row, () => { bump(-1); return show(); }, TextAlignmentOptions.Center);
-            var text = Text(_scrollContent, "", (btn + Gap) * 2, y, inner - (btn + Gap) * 4, Row, 16, false, Cream, TextAlignmentOptions.Center);
-            ButtonRaw(_scrollContent, "+", inner - btn * 2 - Gap, y, btn, Row, () => { bump(1); return show(); }, TextAlignmentOptions.Center);
-            ButtonRaw(_scrollContent, "+10", inner - btn, y, btn, Row, () => { bump(10); return show(); }, TextAlignmentOptions.Center);
-            _refreshers.Add(() => text.text = show());
-            y += Row + Gap;
-            TMP_Text go = ButtonRaw(_scrollContent, "", 0, y, inner, Row, () => Cheats.CleanAround(Cheats.CleanRings), TextAlignmentOptions.Center);
-            _refreshers.Add(() => go.text = "Clean " + Cheats.CleanRings + " ring" + (Cheats.CleanRings == 1 ? "" : "s") + " around me");
-            y += Row + Gap;
-        }
-
-        void ActionRow(ref float y, string label, Func<string> action)
-        {
-            ButtonRaw(_scrollContent, label, 0, y, W - Pad * 2, Row, action, TextAlignmentOptions.Center);
-            y += Row + Gap;
-        }
-
-        /// <summary>A button that needs a second click within 4 seconds before it does anything.</summary>
-        void ConfirmRow(ref float y, string key, string label, Func<string> action, bool danger = false)
-        {
-            TMP_Text text = null;
-            text = ButtonRaw(_scrollContent, label, 0, y, W - Pad * 2, Row, () =>
+            t.overflowMode = TextOverflowModes.Overflow;
+            if (h <= 0)
             {
-                if (_confirmKey == key && Time.unscaledTime < _confirmUntil)
-                {
-                    _confirmKey = null;
-                    return action();
-                }
+                try { h = Mathf.Max(18, t.GetPreferredValues(text, _w, 0).y); }
+                catch (Exception) { h = 18 + 16 * (int)(text.Length * 6.5f / Mathf.Max(1, _w)); }   // rough: ~6.5 px a letter
+            }
+            ((RectTransform)t.transform).sizeDelta = new Vector2(_w, h);
+            y += h + 8;
+            return t;
+        }
+
+        /// <summary>Label (and optional sub-label) on the left, an on/off switch on the right; the whole row is clickable.</summary>
+        [HideFromIl2Cpp]
+        void Switch(ref float y, string label, string sub, Func<bool> get, Action<bool> set)
+        {
+            var row = Box(_page, "Row", _x - 8, y, _w + 16, RowH, Color.clear, 8);
+            MakeClickable(row, () => { set(!get()); return null; }, Color.clear, new Color(1, 1, 1, 0.035f));
+            if (sub == null)
+                Text(_page, label, _x, y, _w - 70, RowH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            else
+            {
+                Text(_page, label, _x, y + 3, _w - 70, 22, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                Text(_page, sub, _x, y + 22, _w - 70, 16, 11, false, Dim, TextAlignmentOptions.MidlineLeft);
+            }
+            var track = Box(_page, "Track", _x + _w - 44, y + 10, 44, 22, Off, pill: true);
+            var knob = Box(track.transform, "Knob", 3, 3, 16, 16, Cream, pill: true);
+            _refreshers.Add(() =>
+            {
+                bool on = get();
+                track.color = on ? Accent : Off;
+                knob.rectTransform.anchoredPosition = new Vector2(on ? 25 : 3, -3);
+                knob.color = on ? Hex("1A120A") : Hex("C9CDD6");
+            });
+            y += RowH;
+        }
+
+        /// <summary>Label on the left, a "- value +" pill on the right.</summary>
+        [HideFromIl2Cpp]
+        void Stepper(ref float y, string label, Func<float> get, Action<float> set, float step, string fmt, string unit = "", float bigStep = 0)
+        {
+            Text(_page, label, _x, y, _w - 200, RowH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            float pw = bigStep > 0 ? 220 : 160, px = _x + _w - pw, py = y + 6;
+            Box(_page, "Pill", px, py, pw, 30, Btn, pill: true);
+            float bx = px;
+            if (bigStep > 0) { PillButton(bx, py, 36, "<<", () => set(get() - bigStep)); bx += 30; }
+            PillButton(bx, py, 36, "-", () => set(get() - step));
+            float rx = px + pw - 36;
+            if (bigStep > 0) { PillButton(rx, py, 36, ">>", () => set(get() + bigStep)); rx -= 30; }
+            PillButton(rx, py, 36, "+", () => set(get() + step));
+            var value = Text(_page, "", bx + 36, py, rx - bx - 36, 30, 14, true, Cream, TextAlignmentOptions.Center);
+            _refreshers.Add(() => value.text = get().ToString(fmt) + "<color=#8B91A0>" + unit + "</color>");
+            y += RowH;
+        }
+
+        [HideFromIl2Cpp]
+        void PillButton(float x, float y, float w, string glyph, Action action)
+        {
+            var b = Box(_page, "Step", x, y, w, 30, Color.clear, pill: true);
+            Text(b.transform, glyph, 0, 0, w, 30, 17, true, Dim, TextAlignmentOptions.Center);
+            MakeClickable(b, () => { action(); return null; }, Color.clear, new Color(1, 1, 1, 0.08f));
+        }
+
+        /// <summary>A row of equal-width buttons. Returns their labels so callers can update them.</summary>
+        [HideFromIl2Cpp]
+        TMP_Text[] Buttons(ref float y, string[] labels, Func<string>[] actions, Color? color = null)
+        {
+            var texts = new TMP_Text[labels.Length];
+            float w = (_w - Gap * (labels.Length - 1)) / labels.Length;
+            for (int i = 0; i < labels.Length; i++)
+                texts[i] = SmallButton(_x + i * (w + Gap), y, w, labels[i], actions[i], color);
+            y += BtnH + Gap;
+            return texts;
+        }
+
+        [HideFromIl2Cpp]
+        TMP_Text SmallButton(float x, float y, float w, string label, Func<string> action, Color? color = null)
+        {
+            var c = color ?? Btn;
+            bool bright = color.HasValue && (c == Accent || c == Info);
+            var b = Box(_page, "Button", x, y, w, BtnH, c, 8);
+            MakeClickable(b, action, c, Color.Lerp(c, Color.white, 0.12f));
+            return Text(b.transform, label, 10, 0, w - 20, BtnH, 14, true, bright ? Hex("16120E") : Cream, TextAlignmentOptions.Center);
+        }
+
+        /// <summary>Name (and faint detail) with one or two action buttons on the right.</summary>
+        [HideFromIl2Cpp]
+        void ListRow(ref float y, string name, string detail, string act1, Func<string> do1, string act2 = null, Func<string> do2 = null)
+        {
+            float bw = 80;
+            float right = act2 != null ? bw * 2 + Gap : bw;
+            Text(_page, name + (detail != null ? "   <color=#5B6170><size=12>" + detail + "</size></color>" : ""), _x, y, _w - right - 10, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            SmallButton(_x + _w - right, y, bw, act1, do1, Accent);
+            if (act2 != null) SmallButton(_x + _w - bw, y, bw, act2, do2, Danger);
+            y += BtnH + Gap;
+        }
+
+        [HideFromIl2Cpp]
+        void KeyRow(ref float y, string label, string key)
+        {
+            Text(_page, label, _x, y, _w - 140, 30, 14, false, Cream, TextAlignmentOptions.MidlineLeft);
+            bool none = string.IsNullOrEmpty(key) || key == "None";
+            var k = Box(_page, "Key", _x + _w - 110, y + 3, 110, 24, none ? Color.clear : Btn, 6);
+            Text(k.transform, none ? "-" : key, 0, 0, 110, 24, 12, true, none ? Faint : Cream, TextAlignmentOptions.Center);
+            y += 32;
+        }
+
+        /// <summary>A full-width button that needs a second click within 4 seconds.</summary>
+        [HideFromIl2Cpp]
+        void Confirm(ref float y, string key, string label, Func<string> action, bool danger)
+        {
+            var t = SmallButton(_x, y, _w, label, ConfirmAction(key, label, action), danger ? Danger : Btn);
+            _refreshers.Add(() => t.text = Armed(key) ? "Click again to confirm" : label);
+            y += BtnH + Gap;
+        }
+
+        [HideFromIl2Cpp]
+        void ConfirmSmall(float x, float y, float w, string key, string label, Func<string> action)
+        {
+            var t = SmallButton(x, y, w, label, ConfirmAction(key, label, action), Danger);
+            _refreshers.Add(() => t.text = Armed(key) ? "Sure?" : label);
+        }
+
+        [HideFromIl2Cpp]
+        bool Armed(string key) { return _confirmKey == key && Time.unscaledTime < _confirmUntil; }
+
+        [HideFromIl2Cpp]
+        Func<string> ConfirmAction(string key, string label, Func<string> action)
+        {
+            return () =>
+            {
+                if (Armed(key)) { _confirmKey = null; return action(); }
                 _confirmKey = key; _confirmUntil = Time.unscaledTime + 4f;
                 return "Click \"" + label + "\" again to confirm.";
-            }, TextAlignmentOptions.Center, danger ? Danger : (Color?)null);
-            _refreshers.Add(() => text.text = (_confirmKey == key && Time.unscaledTime < _confirmUntil) ? "<color=#FFD27F>Click again to confirm</color>" : label);
-            y += Row + Gap;
+            };
         }
 
-        void ConfirmButton(float x, float y, float w, string key, string label, Func<string> action)
+        static ColorBlock Colors(Color normal, Color hover)
         {
-            TMP_Text text = null;
-            text = ButtonRaw(_scrollContent, label, x, y, w, Row, () =>
-            {
-                if (_confirmKey == key && Time.unscaledTime < _confirmUntil) { _confirmKey = null; return action(); }
-                _confirmKey = key; _confirmUntil = Time.unscaledTime + 4f;
-                return "Click " + label + " again to confirm.";
-            }, TextAlignmentOptions.Center, Danger);
-            _refreshers.Add(() => text.text = (_confirmKey == key && Time.unscaledTime < _confirmUntil) ? "<color=#FFD27F>Sure?</color>" : label);
+            var c = ColorBlock.defaultColorBlock;
+            c.normalColor = normal; c.highlightedColor = hover; c.selectedColor = normal; c.pressedColor = Color.Lerp(hover, Color.white, 0.15f);
+            c.disabledColor = normal; c.colorMultiplier = 1; c.fadeDuration = 0.08f;
+            return c;
         }
 
-        void ButtonRow(ref float y, string[] labels, Func<string>[] actions)
+        [HideFromIl2Cpp]
+        void MakeClickable(Image image, Func<string> action, Color normal, Color hover)
         {
-            float inner = W - Pad * 2;
-            float w = (inner - Gap * (labels.Length - 1)) / labels.Length;
-            for (int i = 0; i < labels.Length; i++)
-                ButtonRaw(_scrollContent, labels[i], i * (w + Gap), y, w, Row, actions[i], TextAlignmentOptions.Center);
-            y += Row + Gap;
+            image.raycastTarget = true;
+            image.color = Color.white;   // the button's colour block tints it
+            var button = image.gameObject.AddComponent<Button>();
+            button.targetGraphic = image;
+            button.colors = Colors(normal, hover);
+            button.navigation = new Navigation { mode = Navigation.Mode.None };
+            button.onClick.AddListener(DelegateSupport.ConvertDelegate<UnityEngine.Events.UnityAction>(new Action(() => Run(action))));
         }
+
+        [HideFromIl2Cpp]
+        void Run(Func<string> action)
+        {
+            try { var msg = action(); if (msg != null) Toast(msg); }
+            catch (Exception e) { Toast("Failed: " + e.Message); Plugin.Logger.LogError(e); }
+            _nextRefresh = 0;
+        }
+
+        // ---- primitives ---------------------------------------------------------------------------------
 
         static RectTransform Rect(Transform parent, string name, float x, float y, float w, float h)
         {
@@ -754,6 +1375,7 @@ namespace MoonTrainer
             return rt;
         }
 
+        [HideFromIl2Cpp]
         TMP_Text AddText(GameObject go, float size, bool bold, Color color, TextAlignmentOptions align)
         {
             var t = go.AddComponent<TextMeshProUGUI>();
@@ -764,6 +1386,7 @@ namespace MoonTrainer
             return t;
         }
 
+        [HideFromIl2Cpp]
         TMP_Text Text(Transform parent, string value, float x, float y, float w, float h, float size, bool bold, Color color, TextAlignmentOptions align)
         {
             var rt = Rect(parent, "Text", x, y, w, h);
@@ -772,37 +1395,7 @@ namespace MoonTrainer
             return t;
         }
 
-        TMP_Text ButtonRaw(Transform parent, string label, float x, float y, float w, float h, Func<string> action, TextAlignmentOptions align, Color? baseColor = null)
-        {
-            var rt = Rect(parent, "Button", x, y, w, h);
-            var image = rt.gameObject.AddComponent<Image>();
-            image.color = Color.white;
-            var button = rt.gameObject.AddComponent<Button>();
-            button.targetGraphic = image;
-            var colors = button.colors;
-            var normal = baseColor ?? BtnColor;
-            colors.normalColor = normal; colors.highlightedColor = Color.Lerp(normal, Color.white, 0.12f); colors.selectedColor = normal; colors.pressedColor = Accent;
-            colors.colorMultiplier = 1; colors.fadeDuration = 0.05f;
-            button.colors = colors;
-            button.navigation = new Navigation { mode = Navigation.Mode.None };
-            button.onClick.AddListener(DelegateSupport.ConvertDelegate<UnityEngine.Events.UnityAction>(new Action(() => Run(action))));
-            return Text(rt, label, 12, 0, w - 24, h, 15, true, Cream, align);
-        }
-
-        void Run(Func<string> action)
-        {
-            try { var msg = action(); if (msg != null) Show(msg); }
-            catch (Exception e) { Show("Failed: " + e.Message); Plugin.Logger.LogError(e); }
-            _nextRefresh = 0;
-        }
-
-        void Show(string message)
-        {
-            if (_status != null) _status.text = message;
-            _statusUntil = Time.unscaledTime + 4f;
-            Plugin.Logger.LogInfo(message);
-        }
-
+        [HideFromIl2Cpp]
         void FindFonts()
         {
             if (_fontBold != null && _fontRegular != null) return;

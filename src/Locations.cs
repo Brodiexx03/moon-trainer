@@ -69,10 +69,10 @@ namespace MoonTrainer
         public static string Go(string name)
         {
             foreach (var s in All())
-                if (string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)) return Cheats.TeleportTo(s.Position, s.Name);
+                if (string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase)) return Cheats.TeleportTo(s.Position, s.Name, true);
             // Allow a prefix ("!go base" finds "Base camp").
             foreach (var s in All())
-                if (s.Name.StartsWith(name, StringComparison.OrdinalIgnoreCase)) return Cheats.TeleportTo(s.Position, s.Name);
+                if (s.Name.StartsWith(name, StringComparison.OrdinalIgnoreCase)) return Cheats.TeleportTo(s.Position, s.Name, true);
             return "No saved location called \"" + name + "\".";
         }
 
