@@ -33,6 +33,8 @@ The menu has a tab for each area down the left side and can be dragged by its to
 
 Hotkeys are ignored while you're typing in chat.
 
+The window fades in, pages slide, buttons lift under the mouse, switches glide and numbers count. **Settings > Menu animations and glow** turns all of that off, and **Menu click sound** turns off the click.
+
 - **Presets:** Exploring, Grinding, Building, All off.
 - **Player:** fly, no clip, fly speed, move speed, jump height, unlimited jetpack, gravity boots, night vision, refill, max all upgrades.
 - **Money:** add / set team wallet, earnings multiplier, free upgrades & tools, free station travel.
@@ -45,11 +47,18 @@ Hotkeys are ignored while you're typing in chat.
 - **Build:** place a dust catcher or robot dock (Mk I, Mk II, Joonas) where you're looking.
 - **Crew (host):** give money, upgrades, flags and sites to any crewmate, and see who has the trainer and whether they're up to date, with a button to post them the install link.
 - **Chat:** allowlist (tied to each player's Steam account, not just their name), per-player cooldown and money limit, welcome message for new joiners.
-- **Settings:** remember toggles, active-cheats line, update check, unlock all Steam achievements.
+- **Settings:** remember toggles, active-cheats line, update check, menu animations, click sound, unlock all Steam achievements.
 
 ## Updates
 
-At startup the trainer checks this repo for a newer version. If there is one, the BepInEx console prints a notice, you hear a higher chime in game, and the menu shows an **Update available** box with a **Copy update command** button. Nothing installs by itself: close the game, paste the command into PowerShell, done.
+At startup the trainer checks this repo for a newer version. If there is one:
+
+- **At the main menu** the game's own message box offers it. **UPDATE NOW** downloads it, checks it against the published checksum and installs it, then offers to quit so the new version loads on the next start. **LATER** leaves everything as it is.
+- **In a game** the notice line says so, and the trainer's **Home** tab has an **Update now** button (and still a **Copy PowerShell command** button).
+
+Nothing installs unless you press the button. The version you had is kept next to the new one as `MoonTrainer.dll.previous`.
+
+Version 1.3 and older don't have the button: update those once with the PowerShell command above.
 
 ## Chat commands
 
@@ -105,4 +114,6 @@ The published builds so far were compiled with the Roslyn compiler directly agai
    irm https://raw.githubusercontent.com/Brodiexx03/moon-trainer/test-1.3/install.ps1 | iex
    ```
 
-6. Play with it. When it's good, merge the branch into `main`. Everyone on an older version gets the update notice next time they start the game; nothing installs until they run the command themselves.
+6. Play with it. When it's good, merge the branch into `main`. Everyone on an older version gets the update message next time they start the game; nothing installs until they choose to.
+
+To try the in-game update message itself before a release, put the next version on a test branch and create `Mods\MoonTrainer\update-branch.txt` on one PC containing just the branch name. That PC then checks and installs from that branch instead of `main`. Delete the file to go back.

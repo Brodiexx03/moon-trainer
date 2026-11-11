@@ -28,7 +28,11 @@ namespace MoonTrainer
         static readonly Color CardBg  = Hex("181C25");
         static readonly Color Btn     = Hex("252A36");
         static readonly Color Line    = new Color(1, 1, 1, 0.06f);
-        static readonly Color Accent  = Hex("FF8C33");
+        static readonly Color Accent  = Hex("5700FF");     // buttons, switches, the logo
+        // 5700FF is too dark to read as small text or a thin line on this background, so those use a lighter shade
+        // of the same purple. Warnings keep their amber so they don't look like ordinary highlights.
+        static readonly Color AccentSoft = Hex("9D7BFF");
+        const string AccentSoftHex = "#9D7BFF";
         static readonly Color Cream   = Hex("F2EEE6");
         static readonly Color Dim     = Hex("8B91A0");
         static readonly Color Faint   = Hex("5B6170");
@@ -36,6 +40,8 @@ namespace MoonTrainer
         static readonly Color Good    = Hex("5BC985");
         static readonly Color Info    = Hex("5AB4E6");
         static readonly Color Off     = Hex("3A4050");
+        static readonly Color KnobOff = Hex("C9CDD6");
+        static readonly Color KnobOn  = Hex("FFFFFF");
 
         /// <summary>"FF8C33" -> colour. Worked out by hand: this runs while the class is being set up, before anything
         /// could catch a failed engine call, so it must not make one.</summary>
@@ -64,7 +70,8 @@ namespace MoonTrainer
         const string MenuBrokenText = "The trainer menu couldn't be built on this game version. Hotkeys and chat commands still work - details are in the console.";
         GameObject _canvas, _hudCanvas;
         Canvas _canvasComp;
-        RectTransform _panel, _header, _page, _toastRt, _hudPill;
+        // _frame is what gets positioned and dragged; _panel sits inside it and is what fades and grows when opening
+        RectTransform _frame, _panel, _header, _page, _toastRt, _hudPill;
         ScrollRect _scroll;
         CanvasGroup _toastGroup;
         TMP_FontAsset _fontBold, _fontRegular;
@@ -74,6 +81,27 @@ namespace MoonTrainer
         float _nextRefresh, _toastUntil, _nextPersist, _nextAnnounce;
         bool _rebuildPending; float _rebuildPendingAt;
         string _tab = "Home";
+
+        // ---- effects (all optional: Settings > Menu animations switches them off, and so does any of them failing) ----
+        sealed class Hot { public Button Button; public RectTransform Rt; public Image Glow; public Color GlowColor; public float T, Press; }
+        sealed class Knob { public Image Track, Dot; public bool On, Init; public float T; }
+        sealed class Counter { public TMP_Text Text; public Func<double, string> Fmt; public double From, To, Shown; public float P = 1f; public bool Init; }
+        readonly List<Hot> _hotPage = new List<Hot>(), _hotChrome = new List<Hot>();
+        readonly List<Knob> _knobs = new List<Knob>();
+        readonly List<Counter> _counters = new List<Counter>();
+        readonly List<TMP_Text> _tabLabels = new List<TMP_Text>();
+        float[] _tabT = new float[0];
+        CanvasGroup _panelGroup, _pageGroup;
+        Image _dim, _logoGlow, _homeDot, _homeDotGlow;
+        RectTransform _tabBar, _tabHi;
+        float _openT, _openShown = -1f, _pageT = 1f, _pageShown = -1f, _tabY = -1f, _tabYShown = -1f, _toastShown = -1f;
+        bool _fxShown = true, _fxBroken, _hoverBroken, _soundBroken, _anyActive;
+        AudioSource _audio;
+        static AudioClip _click;
+
+        bool Fx { [HideFromIl2Cpp] get { return !_fxBroken && Settings.MenuEffects.Value; } }
+        static float EaseOut(float t) { t = 1f - Mathf.Clamp01(t); return 1f - t * t * t; }
+        static float Smooth(float t) { t = Mathf.Clamp01(t); return t * t * (3f - 2f * t); }
 
         // content cursor: widgets are placed at (_x, y) with width _w inside _page
         float _x, _w;
@@ -126,12 +154,47 @@ namespace MoonTrainer
                 }
                 var clip = AudioClip.Create("MoonTrainerChime", n, 1, rate, false);
                 clip.SetData(data, 0);
-                var src = gameObject.GetComponent<AudioSource>();
-                if (src == null) src = gameObject.AddComponent<AudioSource>();
-                src.spatialBlend = 0f; src.volume = 0.8f; src.ignoreListenerPause = true;
-                src.PlayOneShot(clip);
+                Speaker().PlayOneShot(clip);
             }
             catch (Exception e) { Plugin.Logger.LogWarning("Chime failed: " + e.Message); }
+        }
+
+        [HideFromIl2Cpp]
+        AudioSource Speaker()
+        {
+            if (!Alive(_audio))
+            {
+                _audio = gameObject.GetComponent<AudioSource>();
+                if (_audio == null) _audio = gameObject.AddComponent<AudioSource>();
+                _audio.spatialBlend = 0f; _audio.volume = 0.8f; _audio.ignoreListenerPause = true;
+            }
+            return _audio;
+        }
+
+        /// <summary>A very short, quiet tick for menu presses.</summary>
+        [HideFromIl2Cpp]
+        void Click()
+        {
+            if (_soundBroken || !Settings.MenuSounds.Value) return;
+            try
+            {
+                if (!Alive(_click))
+                {
+                    int rate = 44100; int n = (int)(rate * 0.05f);
+                    var data = new Il2CppStructArray<float>(n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        float t = (float)i / rate;
+                        float freq = Mathf.Lerp(1500f, 900f, t / 0.05f);
+                        data[i] = Mathf.Sin(2f * Mathf.PI * freq * t) * Mathf.Exp(-t * 90f) * Mathf.Min(1f, t * 800f);
+                    }
+                    _click = AudioClip.Create("MoonTrainerClick", n, 1, rate, false);
+                    _click.SetData(data, 0);
+                    _click.hideFlags = HideFlags.HideAndDontSave;
+                }
+                Speaker().PlayOneShot(_click, 0.22f);
+            }
+            catch (Exception e) { _soundBroken = true; Plugin.Logger.LogWarning("Menu click sound unavailable: " + e.Message); }
         }
 
         void Update()
@@ -144,7 +207,8 @@ namespace MoonTrainer
                 if (Updates.Available != null && !Updates.Announced && Game.InGame)
                 {
                     Updates.Announced = true;
-                    Notice("Moon Trainer " + Updates.Available + " is available - open the menu (" + Settings.MenuKey.Value + ") to update.");
+                    if (Updates.State == Updates.Idle)
+                        Notice("Moon Trainer " + Updates.Available + " is available - open the menu (" + Settings.MenuKey.Value + ") and click Update now.");
                     Chime(990f, 1320f);
                 }
                 if (!_hooksAnnounced && Plugin.FailedHooks.Count > 0 && Game.InGame)
@@ -155,6 +219,7 @@ namespace MoonTrainer
             }
             catch (Exception e) { LogOnce("startup", e); }
 
+            try { UpdatePrompt.Tick(); } catch (Exception e) { LogOnce("update message", e); }
             try { HandleKeys(); } catch (Exception e) { LogOnce("hotkeys", e); }
             try { Cheats.Tick(); } catch (Exception e) { LogOnce("cheats", e); }
             try { Chat.Tick(); } catch (Exception e) { LogOnce("chat", e); }
@@ -184,6 +249,15 @@ namespace MoonTrainer
                 }
             }
             catch (Exception e) { LogOnce("menu", e); }
+
+            try { Animate(); }
+            catch (Exception e)
+            {
+                // Effects are decoration. If one can't run on this game build, drop them all and keep the menu.
+                if (!_fxBroken) Plugin.Logger.LogWarning("Menu effects switched off (" + e.GetType().Name + ": " + e.Message + "). The menu itself is unaffected.");
+                _fxBroken = true;
+                LogOnce("effects", e);
+            }
         }
 
         static readonly Dictionary<string, float> _logged = new Dictionary<string, float>();
@@ -246,7 +320,8 @@ namespace MoonTrainer
                     _buildFailures++;
                     Plugin.Logger.LogError("The trainer menu could not be built: " + e);
                     try { if (_canvas != null) Destroy(_canvas); } catch (Exception) { }
-                    _canvas = null; _panel = null; _header = null; _page = null; _toastGroup = null; _toastText = null;
+                    _canvas = null; _frame = null; _panel = null; _header = null; _page = null; _toastGroup = null; _toastText = null;
+                    _panelGroup = null; _pageGroup = null; _dim = null; _logoGlow = null; _homeDot = null; _homeDotGlow = null; _tabBar = null; _tabHi = null;
                     Notice(MenuBrokenText);
                     return;
                 }
@@ -258,6 +333,10 @@ namespace MoonTrainer
             ClampPanel();
             _open = true;
             _rebuildPending = true;
+            // Fade and grow in from wherever the window is (0 after a full close; part-way if it was still closing).
+            if (!Fx) _openT = 1f;
+            _openShown = -1f; _pageT = 0f; _tabY = -1f;
+            if (_panelGroup != null) _panelGroup.blocksRaycasts = true;
         }
 
         [HideFromIl2Cpp]
@@ -265,8 +344,14 @@ namespace MoonTrainer
         {
             _open = false;
             _dragging = false;
-            if (Alive(_canvas)) _canvas.SetActive(false);
             var walker = Game.Walker;
+            if (Alive(_canvas))
+            {
+                // With effects on, the window fades out over a moment (Animate hides it when done); it stops taking
+                // clicks straight away. Leaving the game hides it at once.
+                if (Fx && walker != null && _panelGroup != null) _panelGroup.blocksRaycasts = false;
+                else { _canvas.SetActive(false); _openT = 0f; }
+            }
             // If one of the game's own screens (map, shop, pause) was open underneath and still is, leave the cursor
             // and controls the way that screen had them. Otherwise hand control back to the player.
             bool gameScreenOpen = _prevBlocked && walker != null && walker.UIBlocked;
@@ -281,14 +366,14 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         void ClampPanel()
         {
-            if (_panel == null) return;
+            if (_frame == null) return;
             // The canvas is 1080 units tall and as wide as the screen's shape makes it (see the CanvasScaler in Build).
             float ch = 1080f, cw = 1080f * Screen.width / Mathf.Max(1, Screen.height);
-            var p = _panel.anchoredPosition;
+            var p = _frame.anchoredPosition;
             float x = Mathf.Clamp(p.x, -(PW - 200), Mathf.Max(0, cw - 200));
             float y = Mathf.Clamp(p.y, -(ch - Head), 0);
             if (x == p.x && y == p.y) return;
-            _panel.anchoredPosition = new Vector2(x, y);
+            _frame.anchoredPosition = new Vector2(x, y);
             Settings.MenuX.Value = x; Settings.MenuY.Value = y;
         }
 
@@ -302,20 +387,20 @@ namespace MoonTrainer
             Vector2 pos = mouse.position.ReadValue();
             if (mouse.leftButton.wasPressedThisFrame && RectTransformUtility.RectangleContainsScreenPoint(_header, pos, null))
             {
-                _dragging = true; _dragStart = pos; _panelStart = _panel.anchoredPosition;
+                _dragging = true; _dragStart = pos; _panelStart = _frame.anchoredPosition;
             }
             if (!_dragging) return;
             if (mouse.leftButton.isPressed)
             {
                 float scale = _canvasComp != null && _canvasComp.scaleFactor > 0 ? _canvasComp.scaleFactor : 1f;
-                _panel.anchoredPosition = _panelStart + (pos - _dragStart) / scale;
+                _frame.anchoredPosition = _panelStart + (pos - _dragStart) / scale;
             }
             else
             {
                 _dragging = false;
                 ClampPanel();
-                Settings.MenuX.Value = _panel.anchoredPosition.x;
-                Settings.MenuY.Value = _panel.anchoredPosition.y;
+                Settings.MenuX.Value = _frame.anchoredPosition.x;
+                Settings.MenuY.Value = _frame.anchoredPosition.y;
             }
         }
 
@@ -434,7 +519,9 @@ namespace MoonTrainer
             if (Game.InGame && !_open && Settings.ShowHud.Value)
             {
                 line = Cheats.ActiveSummary();
-                if (Updates.Available != null) line = (line.Length > 0 ? line + "     " : "") + "<color=#5AB4E6>UPDATE " + Updates.Available + "</color>";
+                if (Updates.Available != null)
+                    line = (line.Length > 0 ? line + "     " : "") + "<color=#5AB4E6>"
+                        + (Updates.State == Updates.Done ? "RESTART TO FINISH UPDATE" : "UPDATE " + Updates.Available) + "</color>";
             }
             if (_hudLine.text != line)
             {
@@ -472,7 +559,7 @@ namespace MoonTrainer
             _hudPill.anchoredPosition = new Vector2(0, -12);
             var lineRt = Rect(_hudPill, "Text", 0, 0, 10, 30);
             lineRt.anchorMin = Vector2.zero; lineRt.anchorMax = Vector2.one; lineRt.sizeDelta = Vector2.zero; lineRt.anchoredPosition = Vector2.zero;
-            _hudLine = AddText(lineRt.gameObject, 13, true, Accent, TextAlignmentOptions.Center);
+            _hudLine = AddText(lineRt.gameObject, 13, true, AccentSoft, TextAlignmentOptions.Center);
             _hudLine.characterSpacing = 2;
             _hudPill.gameObject.SetActive(false);
 
@@ -509,8 +596,25 @@ namespace MoonTrainer
             scaler.matchWidthOrHeight = 1;
             _canvas.AddComponent<GraphicRaycaster>();
 
-            _panel = Rect(_canvas.transform, "Window", 0, 0, PW, PH);
-            _panel.anchoredPosition = new Vector2(Settings.MenuX.Value, Settings.MenuY.Value);
+            _hotChrome.Clear(); _tabLabels.Clear();
+
+            // a faint dim over the game behind the window (fades with it; clicks pass through)
+            try
+            {
+                var dimRt = Rect(_canvas.transform, "Dim", 0, 0, 10, 10);
+                dimRt.anchorMin = Vector2.zero; dimRt.anchorMax = Vector2.one; dimRt.pivot = new Vector2(0.5f, 0.5f);
+                dimRt.sizeDelta = Vector2.zero; dimRt.anchoredPosition = Vector2.zero;
+                _dim = dimRt.gameObject.AddComponent<Image>();
+                _dim.color = Color.clear; _dim.raycastTarget = false;
+            }
+            catch (Exception) { _dim = null; }
+
+            _frame = Rect(_canvas.transform, "Window", 0, 0, PW, PH);
+            _frame.anchoredPosition = new Vector2(Settings.MenuX.Value, Settings.MenuY.Value);
+            _panel = Rect(_frame, "Panel", 0, 0, PW, PH);
+            _panel.pivot = new Vector2(0.5f, 0.5f);                 // so it grows from its middle
+            _panel.anchoredPosition = new Vector2(PW / 2f, -PH / 2f);
+            try { _panelGroup = _panel.gameObject.AddComponent<CanvasGroup>(); } catch (Exception) { _panelGroup = null; }
 
             // soft shadow, border, body
             var shadow = Box(_panel, "Shadow", -30, -26, PW + 60, PH + 64, new Color(0, 0, 0, 0.55f), 0);
@@ -534,34 +638,40 @@ namespace MoonTrainer
             Box(_panel, "HeaderLine", Side, Head, PW - Side, 1, Line, 0);
 
             // brand in the sidebar
+            _logoGlow = Glow(_panel, 1, 1, 60, 60, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.2f), 1f);
             Box(_panel, "Logo", 18, 18, 26, 26, Accent, 7);
-            Text(_panel, "M", 18, 18, 26, 26, 16, true, Hex("16120E"), TextAlignmentOptions.Center);
+            Text(_panel, "M", 18, 18, 26, 26, 16, true, Color.white, TextAlignmentOptions.Center);
             Text(_panel, "MOON TRAINER", 52, 14, Side - 60, 20, 15, true, Cream, TextAlignmentOptions.MidlineLeft).characterSpacing = 3;
             Text(_panel, "v" + Plugin.Version, 52, 33, Side - 60, 16, 11, false, Dim, TextAlignmentOptions.MidlineLeft);
 
-            // tabs
+            // tabs: one highlight and one orange bar that glide to the active tab (see Animate)
             float ty = Head + 12;
+            _tabHi = Box(_panel, "TabHighlight", 10, ty, Side - 20, 34, new Color(1, 1, 1, 0.06f), 8).rectTransform;
             foreach (var tab in Tabs)
             {
                 string t = tab;
                 var bg = Box(_panel, "Tab " + t, 10, ty, Side - 20, 34, Color.clear, 8);
-                var bar = Box(_panel, "TabBar", 10, ty + 8, 3, 18, Accent, 1.5f);
                 var label = Text(_panel, t, 24, ty, Side - 44, 34, 14, true, Dim, TextAlignmentOptions.MidlineLeft);
                 MakeClickable(bg, () => { SwitchTab(t); return null; }, Color.clear, new Color(1, 1, 1, 0.04f));
-                _chrome.Add(() =>
-                {
-                    bool on = _tab == t;
-                    bg.GetComponent<Button>().colors = Colors(on ? new Color(1, 1, 1, 0.06f) : Color.clear, new Color(1, 1, 1, on ? 0.08f : 0.04f));
-                    bar.enabled = on;
-                    label.color = on ? Cream : Dim;
-                });
+                _tabLabels.Add(label);
                 ty += 36;
             }
+            _tabT = new float[_tabLabels.Count];
+            for (int i = 0; i < _tabT.Length; i++) _tabT[i] = -1f;
+            _tabBar = Box(_panel, "TabBar", 10, Head + 20, 3, 18, AccentSoft, 1.5f).rectTransform;
+            _tabY = -1f; _tabYShown = -1f;
+
+            // a small dot on the Home tab that pulses while any cheat is on
+            _homeDotGlow = Glow(_panel, Side - 46, Head + 16, 26, 26, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.3f), 1f);
+            _homeDot = Box(_panel, "ActiveDot", Side - 36, Head + 26, 6, 6, AccentSoft, pill: true);
+            _homeDot.gameObject.SetActive(false);
+            if (_homeDotGlow != null) _homeDotGlow.gameObject.SetActive(false);
 
             // footer of the sidebar: quick "all off"
             var off = Box(_panel, "AllOff", 14, PH - 50, Side - 28, 34, Btn, 8);
             Text(off.transform, "Turn everything off", 0, 0, Side - 28, 34, 13, true, Dim, TextAlignmentOptions.Center);
             MakeClickable(off, () => Cheats.Off(), Btn, Danger);
+            Lift(off, null, Color.clear, _hotChrome);
 
             // page title area
             var title = Text(_panel, "", Side + CP, 10, CW - 40, 26, 20, true, Cream, TextAlignmentOptions.MidlineLeft);
@@ -572,11 +682,13 @@ namespace MoonTrainer
             var close = Box(_panel, "Close", PW - 46, 14, 32, 32, Btn, 8);
             Text(close.transform, "X", 0, 0, 32, 32, 14, true, Dim, TextAlignmentOptions.Center);
             MakeClickable(close, () => { Close(); return null; }, Color.clear, Danger);
+            Lift(close, null, Color.clear, _hotChrome);
 
             // scrolling page
             var view = Rect(_panel, "View", Side, Head + 1, PW - Side, PH - Head - 1);
             view.gameObject.AddComponent<RectMask2D>();
             _page = Rect(view, "Page", 0, 0, PW - Side, 10);
+            try { _pageGroup = _page.gameObject.AddComponent<CanvasGroup>(); } catch (Exception) { _pageGroup = null; }
             _scroll = view.gameObject.AddComponent<ScrollRect>();
             _scroll.content = _page; _scroll.viewport = view; _scroll.horizontal = false;
             _scroll.movementType = ScrollRect.MovementType.Clamped; _scroll.scrollSensitivity = 45; _scroll.inertia = false;
@@ -603,7 +715,7 @@ namespace MoonTrainer
             // toast
             var toast = Box(_panel, "Toast", Side + CP, PH - 56, CW, 38, Hex("232836", 0.98f), 10);
             _toastRt = toast.rectTransform;
-            Box(toast.transform, "ToastAccent", 0, 0, 4, 38, Accent, 2);
+            Box(toast.transform, "ToastAccent", 0, 0, 4, 38, AccentSoft, 2);
             _toastText = Text(toast.transform, "", 16, 0, CW - 28, 38, 13, true, Cream, TextAlignmentOptions.MidlineLeft);
             try
             {
@@ -643,6 +755,7 @@ namespace MoonTrainer
             _tab = tab;
             Settings.LastTab.Value = tab;
             _rebuildPending = true;
+            _pageT = 0f;                                   // the new page slides and fades in
         }
 
         // ---- pages ---------------------------------------------------------------------------------------
@@ -653,6 +766,8 @@ namespace MoonTrainer
         {
             for (int i = _page.childCount - 1; i >= 0; i--) Destroy(_page.GetChild(i).gameObject);
             _refreshers.Clear();
+            _hotPage.Clear(); _knobs.Clear(); _counters.Clear();
+            _pageShown = -1f;
 
             var world = Game.World;
             _waypointRevision = world == null ? -1 : world.WaypointRevision;
@@ -712,7 +827,26 @@ namespace MoonTrainer
                 var c = Card(ref y, null, Hex("10283A"));
                 Label(ref y, "<color=#5AB4E6>UPDATE AVAILABLE</color>   v" + Updates.Available + "  <color=#8B91A0>(you have " + Plugin.Version + ")</color>", 15, true);
                 if (!string.IsNullOrEmpty(Updates.Notes)) Hint(ref y, Updates.Notes);
-                Buttons(ref y, new[] { "Copy update command" }, new Func<string>[] { () =>
+                var status = Hint(ref y, "", 18);
+                status.color = Cream;
+                _refreshers.Add(() =>
+                {
+                    switch (Updates.State)
+                    {
+                        case Updates.Working: status.text = Updates.Status; break;
+                        case Updates.Done: status.text = "<color=#5BC985>Installed.</color>  Restart the game to start using " + Updates.Installed + "."; break;
+                        case Updates.Failed: status.text = "<color=#FF9A4D>Not installed:</color>  " + Updates.Status; break;
+                        default: status.text = "Click Update now and it installs by itself. The game needs a restart afterwards."; break;
+                    }
+                });
+                Buttons(ref y, new[] { "Update now", "Copy PowerShell command" }, new Func<string>[] { () =>
+                {
+                    if (Updates.State == Updates.Done) return "Already installed - restart the game to use it.";
+                    if (Updates.State == Updates.Working) return "Still working on it...";
+                    Updates.Reset();
+                    Updates.InstallInBackground();
+                    return "Updating - you can keep playing.";
+                }, () =>
                 {
                     GUIUtility.systemCopyBuffer = Updates.InstallCommand;
                     return "Copied. Close the game, open PowerShell, right-click to paste, press Enter.";
@@ -748,7 +882,7 @@ namespace MoonTrainer
             t.textWrappingMode = TextWrappingModes.Normal;
             ((RectTransform)t.transform).sizeDelta = new Vector2(_w, 40);
             y += 12;
-            _refreshers.Add(() => { var s = Cheats.ActiveSummary(); t.text = s.Length == 0 ? "<color=#8B91A0>Nothing - the game is vanilla.</color>" : "<color=#FF8C33>" + s + "</color>"; });
+            _refreshers.Add(() => { var s = Cheats.ActiveSummary(); t.text = s.Length == 0 ? "<color=#8B91A0>Nothing - the game is vanilla.</color>" : "<color=" + AccentSoftHex + ">" + s + "</color>"; });
             EndCard(a, ref y);
         }
 
@@ -778,7 +912,7 @@ namespace MoonTrainer
         {
             var w = Card(ref y, "Team wallet");
             var money = Text(_page, "", _x, y, _w, 44, 30, true, Cream, TextAlignmentOptions.MidlineLeft); y += 48;
-            _refreshers.Add(() => money.text = "$" + Game.Money(Game.PlayerId).ToString("N0"));
+            Count(money, () => Game.Money(Game.PlayerId), v => "$" + v.ToString("N0"));
             Buttons(ref y, new[] { "+1k", "+10k", "+100k", "+1M" }, new Func<string>[] {
                 () => AddMoney(1000), () => AddMoney(10000), () => AddMoney(100000), () => AddMoney(1000000) }, Accent);
             Buttons(ref y, new[] { "Set 0", "Set 100k", "Set 10M" }, new Func<string>[] {
@@ -1061,6 +1195,8 @@ namespace MoonTrainer
             Switch(ref y, "Remember toggles between launches", null, () => Settings.RememberCheats.Value, v => Settings.RememberCheats.Value = v);
             Switch(ref y, "Show active cheats on screen", null, () => Settings.ShowHud.Value, v => Settings.ShowHud.Value = v);
             Switch(ref y, "Check for updates at startup", null, () => Settings.CheckForUpdates.Value, v => Settings.CheckForUpdates.Value = v);
+            Switch(ref y, "Menu animations and glow", "Turn off if they're distracting or the game is struggling", () => Settings.MenuEffects.Value, v => Settings.MenuEffects.Value = v);
+            Switch(ref y, "Menu click sound", null, () => Settings.MenuSounds.Value, v => Settings.MenuSounds.Value = v);
             EndCard(g, ref y);
 
             var k = Card(ref y, "Hotkeys");
@@ -1078,7 +1214,7 @@ namespace MoonTrainer
             Buttons(ref y, new[] { "Reset menu position" }, new Func<string>[] { () =>
             {
                 Settings.MenuX.Value = 60; Settings.MenuY.Value = -60;
-                _panel.anchoredPosition = new Vector2(60, -60);
+                _frame.anchoredPosition = new Vector2(60, -60);
                 return "Menu moved back.";
             } });
             Confirm(ref y, "achievements", "Unlock all Steam achievements", () => Cheats.UnlockAchievements(), true);
@@ -1118,6 +1254,7 @@ namespace MoonTrainer
             _nextRefresh = Time.unscaledTime + 0.2f;
             foreach (var r in _chrome) { try { r(); } catch (Exception) { } }
             foreach (var r in _refreshers) { try { r(); } catch (Exception) { } }
+            _anyActive = Cheats.ActiveSummary().Length > 0;
 
             var world = Game.World;
             if (world != null && (world.WaypointRevision != _waypointRevision || world.LandmarkRevision != _landmarkRevision)
@@ -1151,7 +1288,11 @@ namespace MoonTrainer
             }
             bool show = Time.unscaledTime < _toastUntil;
             if (_toastGroup == null) { if (_toastRt.gameObject.activeSelf != show) _toastRt.gameObject.SetActive(show); return; }
-            _toastGroup.alpha = Mathf.MoveTowards(_toastGroup.alpha, show ? 1f : 0f, Time.unscaledDeltaTime * 6f);
+            float a = Mathf.MoveTowards(_toastGroup.alpha, show ? 1f : 0f, Time.unscaledDeltaTime * 6f);
+            if (a == _toastShown) return;
+            _toastShown = a;
+            _toastGroup.alpha = a;
+            _toastRt.anchoredPosition = new Vector2(Side + CP, -(PH - 56) - (Fx ? (1f - EaseOut(a)) * 14f : 0f));
         }
 
         // ---- widgets ---------------------------------------------------------------------------------
@@ -1222,14 +1363,10 @@ namespace MoonTrainer
                 Text(_page, sub, _x, y + 22, _w - 70, 16, 11, false, Dim, TextAlignmentOptions.MidlineLeft);
             }
             var track = Box(_page, "Track", _x + _w - 44, y + 10, 44, 22, Off, pill: true);
-            var knob = Box(track.transform, "Knob", 3, 3, 16, 16, Cream, pill: true);
-            _refreshers.Add(() =>
-            {
-                bool on = get();
-                track.color = on ? Accent : Off;
-                knob.rectTransform.anchoredPosition = new Vector2(on ? 25 : 3, -3);
-                knob.color = on ? Hex("1A120A") : Hex("C9CDD6");
-            });
+            var knob = Box(track.transform, "Knob", 3, 3, 16, 16, KnobOff, pill: true);
+            var k = new Knob { Track = track, Dot = knob };
+            _knobs.Add(k);
+            _refreshers.Add(() => k.On = get());          // Animate moves the knob towards this
             y += RowH;
         }
 
@@ -1247,7 +1384,7 @@ namespace MoonTrainer
             if (bigStep > 0) { PillButton(rx, py, 36, ">>", () => set(get() + bigStep)); rx -= 30; }
             PillButton(rx, py, 36, "+", () => set(get() + step));
             var value = Text(_page, "", bx + 36, py, rx - bx - 36, 30, 14, true, Cream, TextAlignmentOptions.Center);
-            _refreshers.Add(() => value.text = get().ToString(fmt) + "<color=#8B91A0>" + unit + "</color>");
+            Count(value, () => get(), v => ((float)v).ToString(fmt) + "<color=#8B91A0>" + unit + "</color>");
             y += RowH;
         }
 
@@ -1276,9 +1413,14 @@ namespace MoonTrainer
         {
             var c = color ?? Btn;
             bool bright = color.HasValue && (c == Accent || c == Info);
+            var halo = Color.Lerp(c, Color.white, 0.25f);    // a little brighter than the button, so it shows on the dark card
+            Image glow = bright ? Glow(_page, x - 10, y - 10, w + 20, BtnH + 20, new Color(halo.r, halo.g, halo.b, 0f), 3f) : null;
             var b = Box(_page, "Button", x, y, w, BtnH, c, 8);
             MakeClickable(b, action, c, Color.Lerp(c, Color.white, 0.12f));
-            return Text(b.transform, label, 10, 0, w - 20, BtnH, 14, true, bright ? Hex("16120E") : Cream, TextAlignmentOptions.Center);
+            Lift(b, glow, halo, _hotPage);
+            // light text on dark buttons, dark text on light ones
+            bool lightButton = 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b > 0.5f;
+            return Text(b.transform, label, 10, 0, w - 20, BtnH, 14, true, lightButton ? Hex("16120E") : Cream, TextAlignmentOptions.Center);
         }
 
         /// <summary>Name (and faint detail) with one or two action buttons on the right.</summary>
@@ -1356,9 +1498,185 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         void Run(Func<string> action)
         {
+            Click();
             try { var msg = action(); if (msg != null) Toast(msg); }
             catch (Exception e) { Toast("Failed: " + e.Message); Plugin.Logger.LogError(e); }
             _nextRefresh = 0;
+            // Unity keeps a clicked button "selected", which hides its hover highlight until something else is clicked.
+            try { var es = EventSystem.current; if (es != null) es.SetSelectedGameObject(null); } catch (Exception) { }
+        }
+
+        // ---- effects ------------------------------------------------------------------------------------
+
+        /// <summary>A soft blob of colour (the shadow sprite, tinted). Null if this game build can't do it.</summary>
+        static Image Glow(Transform parent, float x, float y, float w, float h, Color color, float tightness)
+        {
+            if (_soft == null || _spritesFailed) return null;
+            try
+            {
+                var img = Box(parent, "Glow", x, y, w, h, color, 0);
+                img.sprite = _soft; img.type = Image.Type.Sliced; img.pixelsPerUnitMultiplier = tightness;
+                return img;
+            }
+            catch (Exception) { return null; }
+        }
+
+        /// <summary>Registers a button to grow slightly under the mouse (and light its glow, if it has one).</summary>
+        [HideFromIl2Cpp]
+        void Lift(Image image, Image glow, Color glowColor, List<Hot> list)
+        {
+            try
+            {
+                var rt = image.rectTransform;
+                var size = rt.sizeDelta; var pos = rt.anchoredPosition;
+                rt.pivot = new Vector2(0.5f, 0.5f);            // grow from the middle, staying where it was
+                rt.anchoredPosition = new Vector2(pos.x + size.x / 2f, pos.y - size.y / 2f);
+                list.Add(new Hot { Button = image.GetComponent<Button>(), Rt = rt, Glow = glow, GlowColor = glowColor });
+            }
+            catch (Exception) { }
+        }
+
+        /// <summary>Shows a number that counts to its new value when it changes.</summary>
+        [HideFromIl2Cpp]
+        void Count(TMP_Text text, Func<double> get, Func<double, string> fmt)
+        {
+            var c = new Counter { Text = text, Fmt = fmt };
+            _counters.Add(c);
+            _refreshers.Add(() =>
+            {
+                double v = get();
+                if (!c.Init) { c.Init = true; c.From = c.To = c.Shown = v; c.P = 1f; c.Text.text = fmt(v); }
+                else if (v != c.To) { c.From = c.Shown; c.To = v; c.P = 0f; }
+            });
+        }
+
+        /// <summary>Runs every frame the window is up: opening and closing, tab changes, hover, switches, numbers, glow.</summary>
+        [HideFromIl2Cpp]
+        void Animate()
+        {
+            if (!Alive(_canvas) || !_canvas.activeSelf || _panel == null) return;
+            float dt = Mathf.Min(Time.unscaledDeltaTime, 0.05f);
+            bool fx = Fx;
+
+            // ---- the window: fades and grows in, shrinks and fades out ----
+            _openT = fx ? Mathf.MoveTowards(_openT, _open ? 1f : 0f, dt / (_open ? 0.16f : 0.10f)) : (_open ? 1f : 0f);
+            if (_openT != _openShown || fx != _fxShown)
+            {
+                _openShown = _openT;
+                float e = EaseOut(_openT);
+                if (_panelGroup != null) _panelGroup.alpha = e;
+                float sc = Mathf.Lerp(0.955f, 1f, e);
+                _panel.localScale = new Vector3(sc, sc, 1f);
+                if (_dim != null) _dim.color = new Color(0, 0, 0, fx ? 0.26f * e : 0f);
+            }
+            if (!_open)
+            {
+                if (_openT <= 0f) _canvas.SetActive(false);
+                _fxShown = fx;
+                return;
+            }
+
+            // ---- the page: slides and fades in after a tab switch ----
+            _pageT = fx ? Mathf.MoveTowards(_pageT, 1f, dt / 0.18f) : 1f;
+            if (_pageT != _pageShown && _page != null)
+            {
+                _pageShown = _pageT;
+                float e = EaseOut(_pageT);
+                if (_pageGroup != null) _pageGroup.alpha = e;
+                var pp = _page.anchoredPosition; pp.x = (1f - e) * 24f; _page.anchoredPosition = pp;
+            }
+
+            // ---- sidebar: the highlight and the orange bar glide to the active tab ----
+            int index = Mathf.Max(0, Array.IndexOf(Tabs, _tab));
+            float wantY = Head + 12 + index * 36;
+            if (_tabY < 0f || !fx || Mathf.Abs(wantY - _tabY) < 0.4f) _tabY = wantY;
+            else _tabY = Mathf.Lerp(_tabY, wantY, 1f - Mathf.Exp(-dt * 22f));
+            if (_tabY != _tabYShown)
+            {
+                _tabYShown = _tabY;
+                if (_tabHi != null) _tabHi.anchoredPosition = new Vector2(10, -_tabY);
+                if (_tabBar != null) _tabBar.anchoredPosition = new Vector2(10, -(_tabY + 8));
+            }
+            for (int i = 0; i < _tabLabels.Count && i < _tabT.Length; i++)
+            {
+                float want = i == index ? 1f : 0f, cur = _tabT[i];
+                float next = (cur < 0f || !fx) ? want : Mathf.MoveTowards(cur, want, dt / 0.15f);
+                if (next == cur) continue;
+                _tabT[i] = next;
+                _tabLabels[i].color = Color.Lerp(Dim, Cream, next);
+            }
+
+            // ---- buttons: grow a touch under the mouse, dip when pressed, glow if they're orange ----
+            if (!_hoverBroken)
+            {
+                try { Hover(_hotChrome, fx, dt); Hover(_hotPage, fx, dt); }
+                catch (Exception e) { _hoverBroken = true; Plugin.Logger.LogWarning("Button hover effects unavailable: " + e.Message); }
+            }
+
+            // ---- switches: the knob glides across and the track fades between grey and orange ----
+            foreach (var k in _knobs)
+            {
+                float want = k.On ? 1f : 0f;
+                if (k.T == want) { k.Init = true; continue; }
+                k.T = (!k.Init || !fx) ? want : Mathf.MoveTowards(k.T, want, dt / 0.14f);    // a freshly built page starts settled
+                k.Init = true;
+                float e = Smooth(k.T);
+                k.Track.color = Color.Lerp(Off, Accent, e);
+                k.Dot.rectTransform.anchoredPosition = new Vector2(Mathf.Lerp(3f, 25f, e), -3f);
+                k.Dot.color = Color.Lerp(KnobOff, KnobOn, e);
+            }
+
+            // ---- numbers: count to their new value ----
+            foreach (var c in _counters)
+            {
+                if (c.P >= 1f) continue;
+                c.P = fx ? Mathf.MoveTowards(c.P, 1f, dt / 0.24f) : 1f;
+                c.Shown = c.P >= 1f ? c.To : c.From + (c.To - c.From) * EaseOut(c.P);
+                c.Text.text = c.Fmt(c.Shown);
+            }
+
+            // ---- glow: the logo breathes; the Home dot pulses while anything is switched on ----
+            if (_homeDot != null && _homeDot.gameObject.activeSelf != _anyActive)
+            {
+                _homeDot.gameObject.SetActive(_anyActive);
+                if (_homeDotGlow != null) _homeDotGlow.gameObject.SetActive(_anyActive);
+            }
+            if (fx)
+            {
+                float now = Time.unscaledTime;
+                if (_logoGlow != null) _logoGlow.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.17f + 0.09f * Mathf.Sin(now * 1.7f));
+                if (_anyActive && _homeDot != null)
+                {
+                    float pulse = 0.5f + 0.5f * Mathf.Sin(now * 3.4f);
+                    _homeDot.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.7f + 0.3f * pulse);
+                    if (_homeDotGlow != null) _homeDotGlow.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.12f + 0.36f * pulse);
+                }
+            }
+            else if (_fxShown)
+            {
+                // just switched off: leave everything in a calm resting state
+                if (_logoGlow != null) _logoGlow.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.17f);
+                if (_homeDot != null) _homeDot.color = AccentSoft;
+                if (_homeDotGlow != null) _homeDotGlow.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.25f);
+            }
+            _fxShown = fx;
+        }
+
+        [HideFromIl2Cpp]
+        void Hover(List<Hot> list, bool fx, float dt)
+        {
+            foreach (var h in list)
+            {
+                bool down = fx && h.Button.IsPressed();
+                bool over = fx && (down || h.Button.IsHighlighted());
+                float t = Mathf.MoveTowards(h.T, over ? 1f : 0f, dt / 0.10f);
+                float press = Mathf.MoveTowards(h.Press, down ? 1f : 0f, dt / 0.06f);
+                if (t == h.T && press == h.Press) continue;
+                h.T = t; h.Press = press;
+                float sc = 1f + 0.03f * EaseOut(t) - 0.05f * press;
+                h.Rt.localScale = new Vector3(sc, sc, 1f);
+                if (h.Glow != null) h.Glow.color = new Color(h.GlowColor.r, h.GlowColor.g, h.GlowColor.b, 0.34f * EaseOut(t));
+            }
         }
 
         // ---- primitives ---------------------------------------------------------------------------------

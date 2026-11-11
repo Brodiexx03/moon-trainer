@@ -14,7 +14,7 @@ namespace MoonTrainer
     {
         public const string Guid = "moontrainer";
         public const string Name = "Moon Trainer";
-        public const string Version = "1.3.0";
+        public const string Version = "1.4.1";
 
         public static ManualLogSource Logger;
 
@@ -131,7 +131,7 @@ namespace MoonTrainer
         public static ConfigEntry<string> ChatAllowlist, ChatAllowlistIds;
         public static ConfigEntry<float> ChatMoneyCap, ChatSessionMoneyCap, ChatCooldown;
         // Interface
-        public static ConfigEntry<bool> ShowHud, CheckForUpdates;
+        public static ConfigEntry<bool> ShowHud, CheckForUpdates, MenuEffects, MenuSounds;
         public static ConfigEntry<float> MenuX, MenuY;
         public static ConfigEntry<string> LastTab;
         // Remembered cheats
@@ -182,10 +182,12 @@ namespace MoonTrainer
             ChatCooldown        = c.Bind("Chat", "CooldownSeconds", 3f, "Seconds a crewmate must wait between commands.");
 
             ShowHud         = c.Bind("Interface", "ShowActiveCheats", true, "Show a small line listing active cheats while the menu is closed.");
-            CheckForUpdates = c.Bind("Interface", "CheckForUpdates", true, "Check GitHub for a newer Moon Trainer at startup and tell you (never installs anything by itself).");
+            CheckForUpdates = c.Bind("Interface", "CheckForUpdates", true, "Check GitHub for a newer Moon Trainer at startup and tell you. It only installs if you press Update now.");
             MenuX     = c.Bind("Interface", "MenuX2", 60f, "Menu position (drag the title bar to move it).");
             MenuY     = c.Bind("Interface", "MenuY2", -60f, "Menu position (drag the title bar to move it).");
             LastTab   = c.Bind("Interface", "LastTab", "Home", "The menu tab that was open last.");
+            MenuEffects = c.Bind("Interface", "MenuEffects", true, "Animations, glow and background dimming in the menu. Turn off if they're distracting or the game is struggling.");
+            MenuSounds  = c.Bind("Interface", "MenuSounds", true, "A soft click when you press something in the menu.");
 
             RememberCheats = c.Bind("Cheats", "RememberBetweenLaunches", true, "Restore your toggles and multipliers next time the game starts.");
             SavedCheats    = c.Bind("Cheats", "Saved", "", "Managed by the trainer.");

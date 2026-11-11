@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
-  "notes": "New menu with tabs. Hotkeys no longer fire while you type in chat, night vision and boots switch off properly, teleports land on the surface and keep no-clip, and crewmates can no longer remove money with chat commands.",
-  "sha256": "8225a6e0a71a71e5115d633c3e123805b0830ce7901c39680addefa200ccca88"
+  "version": "1.4.1",
+  "notes": "From now on you can update inside the game with one click. Also new: a purple look and animated menu.",
+  "sha256": "99b857ec8a458df6cfba2b02101b6aeeb5b65fa78579f050f04cceb266147541"
 }
