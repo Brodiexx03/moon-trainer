@@ -1,5 +1,5 @@
 {
-  "version": "1.4.1",
-  "notes": "From now on you can update inside the game with one click. Also new: a purple look and animated menu.",
-  "sha256": "99b857ec8a458df6cfba2b02101b6aeeb5b65fa78579f050f04cceb266147541"
+  "version": "1.5.0",
+  "notes": "More menu animation: cards rise in, the window springs open, presses flash, values pop, plus drifting stars and a soft glow.",
+  "sha256": "d241ea100c623e025a46dc03aa608f0fd8e98d112282d965f768244f227f0b4b"
 }

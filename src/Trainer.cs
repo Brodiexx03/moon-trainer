@@ -85,7 +85,21 @@ namespace MoonTrainer
         // ---- effects (all optional: Settings > Menu animations switches them off, and so does any of them failing) ----
         sealed class Hot { public Button Button; public RectTransform Rt; public Image Glow; public Color GlowColor; public float T, Press; }
         sealed class Knob { public Image Track, Dot; public bool On, Init; public float T; }
-        sealed class Counter { public TMP_Text Text; public Func<double, string> Fmt; public double From, To, Shown; public float P = 1f; public bool Init; }
+        sealed class Counter { public TMP_Text Text; public RectTransform Rt; public Func<double, string> Fmt; public double From, To, Shown; public float P = 1f, Kick; public bool Init, Flash; public int Dir; }
+        sealed class CardFx { public RectTransform Rt; public CanvasGroup Group; public int Index; public float Shown = -1f; }
+        sealed class Ping { public RectTransform Rt; public Image Img; public Vector2 Size; public float T, Alpha; }
+        sealed class Star { public RectTransform Rt; public Image Img; public float X, Y, Speed, Phase, Rate, Peak; public bool Tinted; }
+        readonly List<CardFx> _cardFx = new List<CardFx>();
+        readonly List<Ping> _pings = new List<Ping>();
+        readonly List<Star> _stars = new List<Star>();
+        readonly System.Random _rng = new System.Random(7);
+        Transform _host;                                   // where widgets are being added: the page, or the current card's group
+        float _pageClock = 10f, _openClock = 10f, _titleShown = -1f, _toastFor = 4f;
+        float[] _tabIn = new float[0];
+        TMP_Text _titleText, _subText;
+        Image _aura, _tabGlow;
+        RectTransform _toastBar;
+        static readonly Color Rose = Hex("FF7A6B");
         readonly List<Hot> _hotPage = new List<Hot>(), _hotChrome = new List<Hot>();
         readonly List<Knob> _knobs = new List<Knob>();
         readonly List<Counter> _counters = new List<Counter>();
@@ -94,7 +108,7 @@ namespace MoonTrainer
         CanvasGroup _panelGroup, _pageGroup;
         Image _dim, _logoGlow, _homeDot, _homeDotGlow;
         RectTransform _tabBar, _tabHi;
-        float _openT, _openShown = -1f, _pageT = 1f, _pageShown = -1f, _tabY = -1f, _tabYShown = -1f, _toastShown = -1f;
+        float _openT, _openShown = -1f, _tabY = -1f, _tabYShown = -1f, _toastShown = -1f;
         bool _fxShown = true, _fxBroken, _hoverBroken, _soundBroken, _anyActive;
         AudioSource _audio;
         static AudioClip _click;
@@ -102,6 +116,8 @@ namespace MoonTrainer
         bool Fx { [HideFromIl2Cpp] get { return !_fxBroken && Settings.MenuEffects.Value; } }
         static float EaseOut(float t) { t = 1f - Mathf.Clamp01(t); return 1f - t * t * t; }
         static float Smooth(float t) { t = Mathf.Clamp01(t); return t * t * (3f - 2f * t); }
+        /// <summary>Like EaseOut, but runs about 10% past the end and settles back (a small spring).</summary>
+        static float Back(float t) { float u = Mathf.Clamp01(t) - 1f; return 1f + 2.70158f * u * u * u + 1.70158f * u * u; }
 
         // content cursor: widgets are placed at (_x, y) with width _w inside _page
         float _x, _w;
@@ -321,6 +337,7 @@ namespace MoonTrainer
                     Plugin.Logger.LogError("The trainer menu could not be built: " + e);
                     try { if (_canvas != null) Destroy(_canvas); } catch (Exception) { }
                     _canvas = null; _frame = null; _panel = null; _header = null; _page = null; _toastGroup = null; _toastText = null;
+                    _aura = null; _tabGlow = null; _toastBar = null; _titleText = null; _subText = null; _stars.Clear(); _pings.Clear();
                     _panelGroup = null; _pageGroup = null; _dim = null; _logoGlow = null; _homeDot = null; _homeDotGlow = null; _tabBar = null; _tabHi = null;
                     Notice(MenuBrokenText);
                     return;
@@ -335,7 +352,8 @@ namespace MoonTrainer
             _rebuildPending = true;
             // Fade and grow in from wherever the window is (0 after a full close; part-way if it was still closing).
             if (!Fx) _openT = 1f;
-            _openShown = -1f; _pageT = 0f; _tabY = -1f;
+            _openShown = -1f; _pageClock = 0f; _openClock = 0f; _tabY = -1f;
+            for (int i = 0; i < _tabIn.Length; i++) _tabIn[i] = -1f;      // the tab names cascade in again
             if (_panelGroup != null) _panelGroup.blocksRaycasts = true;
         }
 
@@ -624,6 +642,7 @@ namespace MoonTrainer
                 catch (Exception) { shadow.enabled = false; }
             }
             else shadow.enabled = false;
+            _aura = Glow(_panel, -46, -46, PW + 92, PH + 92, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0f), 1f);
             Box(_panel, "Border", -1, -1, PW + 2, PH + 2, new Color(1, 1, 1, 0.09f), 15);
             var body = Box(_panel, "Body", 0, 0, PW, PH, Panel, 14);
             body.raycastTarget = true;   // swallow clicks so they don't reach the game
@@ -632,6 +651,25 @@ namespace MoonTrainer
             Box(_panel, "Sidebar", 0, 0, Side, PH, Sidebar, 14);
             Box(_panel, "SidebarEdge", Side - 14, 0, 14, PH, Sidebar, 0);
             Box(_panel, "Divider", Side, 0, 1, PH, Line, 0);
+
+            // a few slow, twinkling specks behind everything (they show in the sidebar and between the cards)
+            _stars.Clear();
+            try
+            {
+                for (int i = 0; i < 34 && !_spritesFailed; i++)
+                {
+                    float size = 1.6f + (float)_rng.NextDouble() * 1.8f;
+                    var dot = Box(_panel, "Star", 0, 0, size, size, Color.clear, pill: true);
+                    _stars.Add(new Star
+                    {
+                        Rt = dot.rectTransform, Img = dot,
+                        X = 10f + (float)_rng.NextDouble() * (PW - 20f), Y = 10f + (float)_rng.NextDouble() * (PH - 20f),
+                        Speed = 3f + (float)_rng.NextDouble() * 8f, Phase = (float)_rng.NextDouble() * 6.28f,
+                        Rate = 0.6f + (float)_rng.NextDouble() * 1.6f, Peak = 0.14f + (float)_rng.NextDouble() * 0.3f, Tinted = i % 3 == 0
+                    });
+                }
+            }
+            catch (Exception) { _stars.Clear(); }
 
             // header (drag handle) over the content side
             _header = Rect(_panel, "Header", 0, 0, PW - 56, Head);
@@ -646,6 +684,7 @@ namespace MoonTrainer
 
             // tabs: one highlight and one orange bar that glide to the active tab (see Animate)
             float ty = Head + 12;
+            _tabGlow = Glow(_panel, -4, ty - 4, 34, 42, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.2f), 1f);
             _tabHi = Box(_panel, "TabHighlight", 10, ty, Side - 20, 34, new Color(1, 1, 1, 0.06f), 8).rectTransform;
             foreach (var tab in Tabs)
             {
@@ -656,8 +695,8 @@ namespace MoonTrainer
                 _tabLabels.Add(label);
                 ty += 36;
             }
-            _tabT = new float[_tabLabels.Count];
-            for (int i = 0; i < _tabT.Length; i++) _tabT[i] = -1f;
+            _tabT = new float[_tabLabels.Count]; _tabIn = new float[_tabLabels.Count];
+            for (int i = 0; i < _tabT.Length; i++) { _tabT[i] = -1f; _tabIn[i] = -1f; }
             _tabBar = Box(_panel, "TabBar", 10, Head + 20, 3, 18, AccentSoft, 1.5f).rectTransform;
             _tabY = -1f; _tabYShown = -1f;
 
@@ -677,6 +716,7 @@ namespace MoonTrainer
             var title = Text(_panel, "", Side + CP, 10, CW - 40, 26, 20, true, Cream, TextAlignmentOptions.MidlineLeft);
             var subtitle = Text(_panel, "", Side + CP, 34, CW - 40, 18, 12, false, Dim, TextAlignmentOptions.MidlineLeft);
             _chrome.Add(() => { title.text = _tab; subtitle.text = Subtitle(_tab); });
+            _titleText = title; _subText = subtitle; _titleShown = -1f;
 
             // close button
             var close = Box(_panel, "Close", PW - 46, 14, 32, 32, Btn, 8);
@@ -717,6 +757,7 @@ namespace MoonTrainer
             _toastRt = toast.rectTransform;
             Box(toast.transform, "ToastAccent", 0, 0, 4, 38, AccentSoft, 2);
             _toastText = Text(toast.transform, "", 16, 0, CW - 28, 38, 13, true, Cream, TextAlignmentOptions.MidlineLeft);
+            _toastBar = Box(toast.transform, "ToastTime", 14, 35, CW - 28, 2, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.8f), 1).rectTransform;
             try
             {
                 _toastGroup = toast.gameObject.AddComponent<CanvasGroup>();
@@ -755,7 +796,7 @@ namespace MoonTrainer
             _tab = tab;
             Settings.LastTab.Value = tab;
             _rebuildPending = true;
-            _pageT = 0f;                                   // the new page slides and fades in
+            _pageClock = 0f;                               // the new page's cards rise in one after another
         }
 
         // ---- pages ---------------------------------------------------------------------------------------
@@ -766,8 +807,8 @@ namespace MoonTrainer
         {
             for (int i = _page.childCount - 1; i >= 0; i--) Destroy(_page.GetChild(i).gameObject);
             _refreshers.Clear();
-            _hotPage.Clear(); _knobs.Clear(); _counters.Clear();
-            _pageShown = -1f;
+            _hotPage.Clear(); _knobs.Clear(); _counters.Clear(); _cardFx.Clear();
+            _host = _page;
 
             var world = Game.World;
             _waypointRevision = world == null ? -1 : world.WaypointRevision;
@@ -911,8 +952,8 @@ namespace MoonTrainer
         void MoneyPage(ref float y)
         {
             var w = Card(ref y, "Team wallet");
-            var money = Text(_page, "", _x, y, _w, 44, 30, true, Cream, TextAlignmentOptions.MidlineLeft); y += 48;
-            Count(money, () => Game.Money(Game.PlayerId), v => "$" + v.ToString("N0"));
+            var money = Text(_host, "", _x, y, _w, 44, 30, true, Cream, TextAlignmentOptions.MidlineLeft); y += 48;
+            Count(money, () => Game.Money(Game.PlayerId), v => "$" + v.ToString("N0"), 0f, true);
             Buttons(ref y, new[] { "+1k", "+10k", "+100k", "+1M" }, new Func<string>[] {
                 () => AddMoney(1000), () => AddMoney(10000), () => AddMoney(100000), () => AddMoney(1000000) }, Accent);
             Buttons(ref y, new[] { "Set 0", "Set 100k", "Set 10M" }, new Func<string>[] {
@@ -951,7 +992,7 @@ namespace MoonTrainer
         void WorldPage(ref float y)
         {
             var t = Card(ref y, "Time");
-            var clock = Text(_page, "", _x, y, _w, 40, 26, true, Cream, TextAlignmentOptions.MidlineLeft); y += 44;
+            var clock = Text(_host, "", _x, y, _w, 40, 26, true, Cream, TextAlignmentOptions.MidlineLeft); y += 44;
             _refreshers.Add(() => clock.text = Cheats.TimeText() + "  <size=13><color=#8B91A0>lunar time</color></size>");
             Switch(ref y, "Freeze time of day", null, () => Cheats.FreezeTime, v => Cheats.FreezeTime = v);
             Stepper(ref y, "Time speed", () => Cheats.TimeSpeed, v => Cheats.TimeSpeed = Mathf.Clamp(Mathf.Round(v * 4) / 4, 0.25f, 50), 0.25f, "0.##", "x");
@@ -1019,7 +1060,7 @@ namespace MoonTrainer
             };
             float arrow = 38, act = 74;
             SmallButton(_x, y, arrow, "<", () => { setPos((getPos() - 1 + list.Count) % list.Count); return null; });
-            var text = Text(_page, "", _x + arrow + 10, y, _w - arrow * 2 - act * 2 - 40, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            var text = Text(_host, "", _x + arrow + 10, y, _w - arrow * 2 - act * 2 - 40, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
             SmallButton(_x + _w - act * 2 - arrow - 16, y, arrow, ">", () => { setPos((getPos() + 1) % list.Count); return null; });
             SmallButton(_x + _w - act * 2 - 8, y, act, "Go", () => Cheats.TeleportToLandmark(list[getPos()]), Accent);
             SmallButton(_x + _w - act, y, act, "Raise", () =>
@@ -1113,8 +1154,8 @@ namespace MoonTrainer
             foreach (var m in _members)
             {
                 var mm = m;
-                var name = Text(_page, mm.Name + (mm.Local ? "  <color=#8B91A0><size=12>you</size></color>" : ""), _x, y, _w - 230, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
-                var chip = Box(_page, "Chip", _x + _w - 220, y + 7, 120, 22, Off, pill: true);
+                var name = Text(_host, mm.Name + (mm.Local ? "  <color=#8B91A0><size=12>you</size></color>" : ""), _x, y, _w - 230, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                var chip = Box(_host, "Chip", _x + _w - 220, y + 7, 120, 22, Off, pill: true);
                 var chipText = Text(chip.transform, "", 0, 0, 120, 22, 11, true, Cream, TextAlignmentOptions.Center);
                 float nextPoll = 0;
                 _refreshers.Add(() =>
@@ -1181,7 +1222,7 @@ namespace MoonTrainer
             {
                 if (shown++ >= 10) break;
                 string manifest = b;
-                Text(_page, Game.BackupLabel(b), _x, y, _w - 120, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                Text(_host, Game.BackupLabel(b), _x, y, _w - 120, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
                 ConfirmSmall(_x + _w - 100, y, 100, "restore:" + manifest, "Restore", () => Game.RestoreBackup(manifest));
                 y += BtnH + Gap;
             }
@@ -1268,7 +1309,7 @@ namespace MoonTrainer
         {
             if (string.IsNullOrEmpty(message) || _toastText == null) return;
             _toastText.text = message;
-            _toastUntil = Time.unscaledTime + 4f;
+            _toastUntil = Time.unscaledTime + 4f; _toastFor = 4f;
             _noticeShownUntil = _noticeUntil;
             Plugin.Logger.LogInfo(message);
         }
@@ -1285,8 +1326,11 @@ namespace MoonTrainer
                 _noticeShownUntil = _noticeUntil;
                 _toastText.text = _notice;
                 _toastUntil = Mathf.Max(_toastUntil, _noticeUntil - 1f);
+                _toastFor = Mathf.Max(0.5f, _toastUntil - Time.unscaledTime);
             }
             bool show = Time.unscaledTime < _toastUntil;
+            if (show && _toastBar != null)
+                _toastBar.sizeDelta = new Vector2((CW - 28) * Mathf.Clamp01((_toastUntil - Time.unscaledTime) / _toastFor), 2);
             if (_toastGroup == null) { if (_toastRt.gameObject.activeSelf != show) _toastRt.gameObject.SetActive(show); return; }
             float a = Mathf.MoveTowards(_toastGroup.alpha, show ? 1f : 0f, Time.unscaledDeltaTime * 6f);
             if (a == _toastShown) return;
@@ -1303,13 +1347,24 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         CardInfo Card(ref float y, string title, Color? color = null)
         {
+            // Each card (with its caption and everything in it) lives in its own group, so it can rise in by itself.
+            // The group sits at the page's origin, so everything inside still uses page coordinates.
+            _host = _page;
+            try
+            {
+                var grp = Rect(_page, "Group", 0, 0, PW - Side, 10);
+                var cg = grp.gameObject.AddComponent<CanvasGroup>();
+                _cardFx.Add(new CardFx { Rt = grp, Group = cg, Index = _cardFx.Count });
+                _host = grp;
+            }
+            catch (Exception) { _host = _page; }
             if (title != null)
             {
-                var t = Text(_page, title.ToUpper(), CP + 2, y, CW, 18, 11, true, Faint, TextAlignmentOptions.BottomLeft);
+                var t = Text(_host, title.ToUpper(), CP + 2, y, CW, 18, 11, true, Faint, TextAlignmentOptions.BottomLeft);
                 t.characterSpacing = 4;
                 y += 24;
             }
-            var bg = Box(_page, "Card", CP, y, CW, 10, color ?? CardBg, 12);
+            var bg = Box(_host, "Card", CP, y, CW, 10, color ?? CardBg, 12);
             var info = new CardInfo { Bg = bg.rectTransform, Top = y };
             y += 14;
             _x = CP + 16; _w = CW - 32;
@@ -1323,12 +1378,13 @@ namespace MoonTrainer
             c.Bg.sizeDelta = new Vector2(CW, y - c.Top);
             y += 18;
             _x = CP; _w = CW;
+            _host = _page;
         }
 
         [HideFromIl2Cpp]
         TMP_Text Label(ref float y, string text, float size, bool bold)
         {
-            var t = Text(_page, text, _x, y, _w, 28, size, bold, Cream, TextAlignmentOptions.MidlineLeft);
+            var t = Text(_host, text, _x, y, _w, 28, size, bold, Cream, TextAlignmentOptions.MidlineLeft);
             y += 32;
             return t;
         }
@@ -1336,7 +1392,7 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         TMP_Text Hint(ref float y, string text, float h = 0)
         {
-            var t = Text(_page, text, _x, y, _w, 20, 12, false, Dim, TextAlignmentOptions.TopLeft);
+            var t = Text(_host, text, _x, y, _w, 20, 12, false, Dim, TextAlignmentOptions.TopLeft);
             t.textWrappingMode = TextWrappingModes.Normal;
             t.overflowMode = TextOverflowModes.Overflow;
             if (h <= 0)
@@ -1353,16 +1409,16 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         void Switch(ref float y, string label, string sub, Func<bool> get, Action<bool> set)
         {
-            var row = Box(_page, "Row", _x - 8, y, _w + 16, RowH, Color.clear, 8);
+            var row = Box(_host, "Row", _x - 8, y, _w + 16, RowH, Color.clear, 8);
             MakeClickable(row, () => { set(!get()); return null; }, Color.clear, new Color(1, 1, 1, 0.035f));
             if (sub == null)
-                Text(_page, label, _x, y, _w - 70, RowH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                Text(_host, label, _x, y, _w - 70, RowH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
             else
             {
-                Text(_page, label, _x, y + 3, _w - 70, 22, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
-                Text(_page, sub, _x, y + 22, _w - 70, 16, 11, false, Dim, TextAlignmentOptions.MidlineLeft);
+                Text(_host, label, _x, y + 3, _w - 70, 22, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                Text(_host, sub, _x, y + 22, _w - 70, 16, 11, false, Dim, TextAlignmentOptions.MidlineLeft);
             }
-            var track = Box(_page, "Track", _x + _w - 44, y + 10, 44, 22, Off, pill: true);
+            var track = Box(_host, "Track", _x + _w - 44, y + 10, 44, 22, Off, pill: true);
             var knob = Box(track.transform, "Knob", 3, 3, 16, 16, KnobOff, pill: true);
             var k = new Knob { Track = track, Dot = knob };
             _knobs.Add(k);
@@ -1374,16 +1430,16 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         void Stepper(ref float y, string label, Func<float> get, Action<float> set, float step, string fmt, string unit = "", float bigStep = 0)
         {
-            Text(_page, label, _x, y, _w - 200, RowH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            Text(_host, label, _x, y, _w - 200, RowH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
             float pw = bigStep > 0 ? 220 : 160, px = _x + _w - pw, py = y + 6;
-            Box(_page, "Pill", px, py, pw, 30, Btn, pill: true);
+            Box(_host, "Pill", px, py, pw, 30, Btn, pill: true);
             float bx = px;
             if (bigStep > 0) { PillButton(bx, py, 36, "<<", () => set(get() - bigStep)); bx += 30; }
             PillButton(bx, py, 36, "-", () => set(get() - step));
             float rx = px + pw - 36;
             if (bigStep > 0) { PillButton(rx, py, 36, ">>", () => set(get() + bigStep)); rx -= 30; }
             PillButton(rx, py, 36, "+", () => set(get() + step));
-            var value = Text(_page, "", bx + 36, py, rx - bx - 36, 30, 14, true, Cream, TextAlignmentOptions.Center);
+            var value = Text(_host, "", bx + 36, py, rx - bx - 36, 30, 14, true, Cream, TextAlignmentOptions.Center);
             Count(value, () => get(), v => ((float)v).ToString(fmt) + "<color=#8B91A0>" + unit + "</color>");
             y += RowH;
         }
@@ -1391,7 +1447,7 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         void PillButton(float x, float y, float w, string glyph, Action action)
         {
-            var b = Box(_page, "Step", x, y, w, 30, Color.clear, pill: true);
+            var b = Box(_host, "Step", x, y, w, 30, Color.clear, pill: true);
             Text(b.transform, glyph, 0, 0, w, 30, 17, true, Dim, TextAlignmentOptions.Center);
             MakeClickable(b, () => { action(); return null; }, Color.clear, new Color(1, 1, 1, 0.08f));
         }
@@ -1414,8 +1470,8 @@ namespace MoonTrainer
             var c = color ?? Btn;
             bool bright = color.HasValue && (c == Accent || c == Info);
             var halo = Color.Lerp(c, Color.white, 0.25f);    // a little brighter than the button, so it shows on the dark card
-            Image glow = bright ? Glow(_page, x - 10, y - 10, w + 20, BtnH + 20, new Color(halo.r, halo.g, halo.b, 0f), 3f) : null;
-            var b = Box(_page, "Button", x, y, w, BtnH, c, 8);
+            Image glow = bright ? Glow(_host, x - 10, y - 10, w + 20, BtnH + 20, new Color(halo.r, halo.g, halo.b, 0f), 3f) : null;
+            var b = Box(_host, "Button", x, y, w, BtnH, c, 8);
             MakeClickable(b, action, c, Color.Lerp(c, Color.white, 0.12f));
             Lift(b, glow, halo, _hotPage);
             // light text on dark buttons, dark text on light ones
@@ -1429,7 +1485,7 @@ namespace MoonTrainer
         {
             float bw = 80;
             float right = act2 != null ? bw * 2 + Gap : bw;
-            Text(_page, name + (detail != null ? "   <color=#5B6170><size=12>" + detail + "</size></color>" : ""), _x, y, _w - right - 10, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            Text(_host, name + (detail != null ? "   <color=#5B6170><size=12>" + detail + "</size></color>" : ""), _x, y, _w - right - 10, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
             SmallButton(_x + _w - right, y, bw, act1, do1, Accent);
             if (act2 != null) SmallButton(_x + _w - bw, y, bw, act2, do2, Danger);
             y += BtnH + Gap;
@@ -1438,9 +1494,9 @@ namespace MoonTrainer
         [HideFromIl2Cpp]
         void KeyRow(ref float y, string label, string key)
         {
-            Text(_page, label, _x, y, _w - 140, 30, 14, false, Cream, TextAlignmentOptions.MidlineLeft);
+            Text(_host, label, _x, y, _w - 140, 30, 14, false, Cream, TextAlignmentOptions.MidlineLeft);
             bool none = string.IsNullOrEmpty(key) || key == "None";
-            var k = Box(_page, "Key", _x + _w - 110, y + 3, 110, 24, none ? Color.clear : Btn, 6);
+            var k = Box(_host, "Key", _x + _w - 110, y + 3, 110, 24, none ? Color.clear : Btn, 6);
             Text(k.transform, none ? "-" : key, 0, 0, 110, 24, 12, true, none ? Faint : Cream, TextAlignmentOptions.Center);
             y += 32;
         }
@@ -1492,13 +1548,14 @@ namespace MoonTrainer
             button.targetGraphic = image;
             button.colors = Colors(normal, hover);
             button.navigation = new Navigation { mode = Navigation.Mode.None };
-            button.onClick.AddListener(DelegateSupport.ConvertDelegate<UnityEngine.Events.UnityAction>(new Action(() => Run(action))));
+            button.onClick.AddListener(DelegateSupport.ConvertDelegate<UnityEngine.Events.UnityAction>(new Action(() => Run(action, image))));
         }
 
         [HideFromIl2Cpp]
-        void Run(Func<string> action)
+        void Run(Func<string> action, Image pressed)
         {
             Click();
+            PingAt(pressed);
             try { var msg = action(); if (msg != null) Toast(msg); }
             catch (Exception e) { Toast("Failed: " + e.Message); Plugin.Logger.LogError(e); }
             _nextRefresh = 0;
@@ -1538,16 +1595,46 @@ namespace MoonTrainer
 
         /// <summary>Shows a number that counts to its new value when it changes.</summary>
         [HideFromIl2Cpp]
-        void Count(TMP_Text text, Func<double> get, Func<double, string> fmt)
+        void Count(TMP_Text text, Func<double> get, Func<double, string> fmt, float pivotX = 0.5f, bool flash = false)
         {
-            var c = new Counter { Text = text, Fmt = fmt };
+            var c = new Counter { Text = text, Fmt = fmt, Flash = flash };
+            try
+            {
+                // pop from the middle (or from the left edge for left-aligned text) without moving
+                var rt = text.rectTransform; var size = rt.sizeDelta; var pos = rt.anchoredPosition;
+                rt.pivot = new Vector2(pivotX, 0.5f);
+                rt.anchoredPosition = new Vector2(pos.x + size.x * pivotX, pos.y - size.y / 2f);
+                c.Rt = rt;
+            }
+            catch (Exception) { c.Rt = null; }
             _counters.Add(c);
             _refreshers.Add(() =>
             {
                 double v = get();
                 if (!c.Init) { c.Init = true; c.From = c.To = c.Shown = v; c.P = 1f; c.Text.text = fmt(v); }
-                else if (v != c.To) { c.From = c.Shown; c.To = v; c.P = 0f; }
+                else if (v != c.To) { c.Dir = v > c.To ? 1 : -1; c.From = c.Shown; c.To = v; c.P = 0f; c.Kick = 1f; }
             });
+        }
+
+        /// <summary>A quick flash that spreads out from whatever was just pressed.</summary>
+        [HideFromIl2Cpp]
+        void PingAt(Image src)
+        {
+            if (!Fx || src == null || _pings.Count > 12) return;
+            try
+            {
+                var from = src.rectTransform;
+                var size = from.sizeDelta; var pos = from.anchoredPosition; var pivot = from.pivot;
+                var rt = Rect(from.parent, "Ping", 0, 0, size.x, size.y);
+                rt.pivot = new Vector2(0.5f, 0.5f);
+                rt.anchoredPosition = new Vector2(pos.x + (0.5f - pivot.x) * size.x, pos.y + (0.5f - pivot.y) * size.y);
+                var img = rt.gameObject.AddComponent<Image>();
+                img.raycastTarget = false;
+                img.color = new Color(1f, 1f, 1f, 0f);
+                if (src.sprite != null) { img.sprite = src.sprite; img.type = src.type; img.pixelsPerUnitMultiplier = src.pixelsPerUnitMultiplier; }
+                _pings.Add(new Ping { Rt = rt, Img = img, Size = size, Alpha = size.x > 300f ? 0.09f : 0.24f });
+            }
+            catch (Exception) { }
         }
 
         /// <summary>Runs every frame the window is up: opening and closing, tab changes, hover, switches, numbers, glow.</summary>
@@ -1559,51 +1646,93 @@ namespace MoonTrainer
             bool fx = Fx;
 
             // ---- the window: fades and grows in, shrinks and fades out ----
-            _openT = fx ? Mathf.MoveTowards(_openT, _open ? 1f : 0f, dt / (_open ? 0.16f : 0.10f)) : (_open ? 1f : 0f);
+            _openT = fx ? Mathf.MoveTowards(_openT, _open ? 1f : 0f, dt / (_open ? 0.26f : 0.10f)) : (_open ? 1f : 0f);
             if (_openT != _openShown || fx != _fxShown)
             {
                 _openShown = _openT;
                 float e = EaseOut(_openT);
                 if (_panelGroup != null) _panelGroup.alpha = e;
-                float sc = Mathf.Lerp(0.955f, 1f, e);
+                // opening springs a touch past full size and settles; closing just shrinks away
+                float sc = _open ? 0.90f + 0.10f * Back(_openT) : Mathf.Lerp(0.955f, 1f, e);
                 _panel.localScale = new Vector3(sc, sc, 1f);
                 if (_dim != null) _dim.color = new Color(0, 0, 0, fx ? 0.26f * e : 0f);
             }
             if (!_open)
             {
+                // closing: drop any press flashes rather than leaving them to finish next time the menu opens
+                for (int i = _pings.Count - 1; i >= 0; i--) { if (Alive(_pings[i].Img)) Destroy(_pings[i].Rt.gameObject); }
+                _pings.Clear();
                 if (_openT <= 0f) _canvas.SetActive(false);
                 _fxShown = fx;
                 return;
             }
 
-            // ---- the page: slides and fades in after a tab switch ----
-            _pageT = fx ? Mathf.MoveTowards(_pageT, 1f, dt / 0.18f) : 1f;
-            if (_pageT != _pageShown && _page != null)
+            _pageClock = Mathf.Min(10f, _pageClock + dt);
+            _openClock = Mathf.Min(10f, _openClock + dt);
+
+            // ---- the page: its cards rise and fade in one after another; the title slides in ----
+            foreach (var c in _cardFx)
             {
-                _pageShown = _pageT;
-                float e = EaseOut(_pageT);
-                if (_pageGroup != null) _pageGroup.alpha = e;
-                var pp = _page.anchoredPosition; pp.x = (1f - e) * 24f; _page.anchoredPosition = pp;
+                float t = fx ? Mathf.Clamp01((_pageClock - c.Index * 0.055f) / 0.28f) : 1f;
+                if (t == c.Shown) continue;
+                c.Shown = t;
+                float e = EaseOut(t);
+                c.Group.alpha = e;
+                c.Rt.anchoredPosition = new Vector2(0f, -(1f - e) * 22f);
+            }
+            float titleT = fx ? Mathf.Clamp01(_pageClock / 0.24f) : 1f;
+            if (titleT != _titleShown && _titleText != null && _subText != null)
+            {
+                _titleShown = titleT;
+                float e = EaseOut(titleT);
+                _titleText.color = new Color(Cream.r, Cream.g, Cream.b, e);
+                _subText.color = new Color(Dim.r, Dim.g, Dim.b, e);
+                _titleText.rectTransform.anchoredPosition = new Vector2(Side + CP + (1f - e) * 14f, -10f);
+                _subText.rectTransform.anchoredPosition = new Vector2(Side + CP + (1f - e) * 20f, -34f);
             }
 
-            // ---- sidebar: the highlight and the orange bar glide to the active tab ----
+            // ---- sidebar: the highlight glides to the active tab; the bar stretches as it travels ----
             int index = Mathf.Max(0, Array.IndexOf(Tabs, _tab));
             float wantY = Head + 12 + index * 36;
             if (_tabY < 0f || !fx || Mathf.Abs(wantY - _tabY) < 0.4f) _tabY = wantY;
-            else _tabY = Mathf.Lerp(_tabY, wantY, 1f - Mathf.Exp(-dt * 22f));
+            else _tabY = Mathf.Lerp(_tabY, wantY, 1f - Mathf.Exp(-dt * 20f));
             if (_tabY != _tabYShown)
             {
                 _tabYShown = _tabY;
+                float stretch = Mathf.Min(18f, Mathf.Abs(wantY - _tabY) * 0.45f);
                 if (_tabHi != null) _tabHi.anchoredPosition = new Vector2(10, -_tabY);
-                if (_tabBar != null) _tabBar.anchoredPosition = new Vector2(10, -(_tabY + 8));
+                if (_tabBar != null)
+                {
+                    _tabBar.sizeDelta = new Vector2(3f, 18f + stretch);
+                    _tabBar.anchoredPosition = new Vector2(10, -(_tabY + 8f - stretch / 2f));
+                }
+                if (_tabGlow != null) _tabGlow.rectTransform.anchoredPosition = new Vector2(-4, -(_tabY - 4f));
             }
+            // tab names: brighten when active, and cascade in from the left when the menu opens
             for (int i = 0; i < _tabLabels.Count && i < _tabT.Length; i++)
             {
                 float want = i == index ? 1f : 0f, cur = _tabT[i];
                 float next = (cur < 0f || !fx) ? want : Mathf.MoveTowards(cur, want, dt / 0.15f);
-                if (next == cur) continue;
-                _tabT[i] = next;
-                _tabLabels[i].color = Color.Lerp(Dim, Cream, next);
+                float inT = fx ? Mathf.Clamp01((_openClock - 0.04f - i * 0.018f) / 0.22f) : 1f;
+                bool moved = inT != _tabIn[i];
+                if (next == cur && !moved) continue;
+                _tabT[i] = next; _tabIn[i] = inT;
+                float ie = EaseOut(inT);
+                var col = Color.Lerp(Dim, Cream, next); col.a = ie;
+                _tabLabels[i].color = col;
+                if (moved) _tabLabels[i].rectTransform.anchoredPosition = new Vector2(24f - (1f - ie) * 14f, -(Head + 12 + i * 36));
+            }
+
+            // ---- presses: a flash spreads out from the button and fades ----
+            for (int i = _pings.Count - 1; i >= 0; i--)
+            {
+                var p = _pings[i];
+                if (!Alive(p.Img)) { _pings.RemoveAt(i); continue; }
+                p.T += dt / 0.36f;
+                if (p.T >= 1f) { Destroy(p.Rt.gameObject); _pings.RemoveAt(i); continue; }
+                float grow = 16f * EaseOut(p.T);
+                p.Rt.sizeDelta = new Vector2(p.Size.x + grow, p.Size.y + grow);
+                p.Img.color = new Color(1f, 1f, 1f, p.Alpha * (1f - p.T));
             }
 
             // ---- buttons: grow a touch under the mouse, dip when pressed, glow if they're orange ----
@@ -1618,21 +1747,34 @@ namespace MoonTrainer
             {
                 float want = k.On ? 1f : 0f;
                 if (k.T == want) { k.Init = true; continue; }
-                k.T = (!k.Init || !fx) ? want : Mathf.MoveTowards(k.T, want, dt / 0.14f);    // a freshly built page starts settled
+                k.T = (!k.Init || !fx) ? want : Mathf.MoveTowards(k.T, want, dt / 0.2f);     // a freshly built page starts settled
                 k.Init = true;
                 float e = Smooth(k.T);
+                float wide = 16f + 8f * Mathf.Sin(k.T * Mathf.PI);          // the knob stretches while it's on the move
                 k.Track.color = Color.Lerp(Off, Accent, e);
-                k.Dot.rectTransform.anchoredPosition = new Vector2(Mathf.Lerp(3f, 25f, e), -3f);
+                var knob = k.Dot.rectTransform;
+                knob.sizeDelta = new Vector2(wide, 16f);
+                knob.anchoredPosition = new Vector2(Mathf.Lerp(3f, 25f, e) - (wide - 16f) / 2f, -3f);
                 k.Dot.color = Color.Lerp(KnobOff, KnobOn, e);
             }
 
             // ---- numbers: count to their new value ----
             foreach (var c in _counters)
             {
-                if (c.P >= 1f) continue;
-                c.P = fx ? Mathf.MoveTowards(c.P, 1f, dt / 0.24f) : 1f;
-                c.Shown = c.P >= 1f ? c.To : c.From + (c.To - c.From) * EaseOut(c.P);
-                c.Text.text = c.Fmt(c.Shown);
+                if (c.P < 1f)
+                {
+                    c.P = fx ? Mathf.MoveTowards(c.P, 1f, dt / 0.24f) : 1f;
+                    c.Shown = c.P >= 1f ? c.To : c.From + (c.To - c.From) * EaseOut(c.P);
+                    c.Text.text = c.Fmt(c.Shown);
+                }
+                if (c.Kick > 0f)
+                {
+                    // a little pop when the value changes; the wallet also flashes green (up) or red (down)
+                    c.Kick = fx ? Mathf.MoveTowards(c.Kick, 0f, dt / 0.34f) : 0f;
+                    float k = c.Kick * c.Kick;
+                    if (c.Rt != null) { float sc = 1f + 0.10f * k; c.Rt.localScale = new Vector3(sc, sc, 1f); }
+                    if (c.Flash) c.Text.color = Color.Lerp(Cream, c.Dir > 0 ? Good : Rose, k);
+                }
             }
 
             // ---- glow: the logo breathes; the Home dot pulses while anything is switched on ----
@@ -1644,6 +1786,15 @@ namespace MoonTrainer
             if (fx)
             {
                 float now = Time.unscaledTime;
+                if (_aura != null) _aura.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.13f + 0.06f * Mathf.Sin(now * 1.3f));
+                foreach (var st in _stars)
+                {
+                    st.Y -= st.Speed * dt;                                       // drifting slowly upwards
+                    if (st.Y < 8f) { st.Y = PH - 8f; st.X = 10f + (float)_rng.NextDouble() * (PW - 20f); }
+                    st.Rt.anchoredPosition = new Vector2(st.X, -st.Y);
+                    float a = st.Peak * (0.3f + 0.7f * (0.5f + 0.5f * Mathf.Sin(now * st.Rate + st.Phase)));
+                    st.Img.color = st.Tinted ? new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, a) : new Color(1f, 1f, 1f, a);
+                }
                 if (_logoGlow != null) _logoGlow.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.17f + 0.09f * Mathf.Sin(now * 1.7f));
                 if (_anyActive && _homeDot != null)
                 {
@@ -1655,6 +1806,8 @@ namespace MoonTrainer
             else if (_fxShown)
             {
                 // just switched off: leave everything in a calm resting state
+                if (_aura != null) _aura.color = Color.clear;
+                foreach (var st in _stars) st.Img.color = Color.clear;
                 if (_logoGlow != null) _logoGlow.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.17f);
                 if (_homeDot != null) _homeDot.color = AccentSoft;
                 if (_homeDotGlow != null) _homeDotGlow.color = new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.25f);

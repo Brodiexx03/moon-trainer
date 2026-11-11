@@ -33,7 +33,7 @@ The menu has a tab for each area down the left side and can be dragged by its to
 
 Hotkeys are ignored while you're typing in chat.
 
-The window fades in, pages slide, buttons lift under the mouse, switches glide and numbers count. **Settings > Menu animations and glow** turns all of that off, and **Menu click sound** turns off the click.
+The window springs open, cards rise in one after another, buttons lift and flash when pressed, switches glide, numbers count and pop, and slow stars drift behind it all. **Settings > Menu animations and glow** turns all of that off, and **Menu click sound** turns off the click.
 
 - **Presets:** Exploring, Grinding, Building, All off.
 - **Player:** fly, no clip, fly speed, move speed, jump height, unlimited jetpack, gravity boots, night vision, refill, max all upgrades.
