@@ -22,6 +22,8 @@ namespace MoonTrainer
         private static readonly HashSet<string> _seenMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static float _nextMemberPoll;
         private static bool _membersPrimed;
+        private static string _ownText;
+        private static float _ownAt = -100f;
 
         public static readonly string Help =
             "trainer, money <amt>, jetpack, boots, nv, belt, lamp, speed, jump, width, payout, all, flag, site, players | fly, noclip, flyspeed <n>, tp <marker#>, tpto <name>, save [name], go <name> (need the mod)";
@@ -39,24 +41,61 @@ namespace MoonTrainer
             var cmd = parts[0].ToLowerInvariant();
             var arg = parts.Length > 1 ? parts[1].Trim() : null;
 
+            bool giveable = IsKnown(cmd);
             string playerId;
             string who;
-            if (fromSelf) { playerId = Game.PlayerId; who = "you"; }
+            if (fromSelf)
+            {
+                playerId = Game.PlayerId; who = "you";
+                _ownText = said; _ownAt = Time.unscaledTime;
+                if (giveable && Game.IsCrewmate && Game.HostHasTrainer())
+                {
+                    // The host owns the wallet and everyone's upgrades, and their trainer reads this same chat line.
+                    // Doing it here as well would apply it twice, or only on this PC.
+                    Trainer.Notice("Sent. The host's trainer handles " + prefix + cmd + ".");
+                    return;
+                }
+            }
             else
             {
                 if (Game.IsCrewmate) return;             // only the host owns wallets and upgrades
-                if (Settings.ChatAllowlistOnly.Value && !Settings.OnAllowlist(senderName))
-                {
-                    if (IsKnown(cmd)) Reply(senderName + ": chat commands are allowlist-only in this lobby.");
-                    return;
-                }
+                if (string.IsNullOrEmpty(senderName)) return;
+                // Our own lines can come back through "heard" too. The hook on sending has already dealt with them.
+                bool sayHooked = !Plugin.FailedHooks.Contains("ChatPatches.Say");
+                if (sayHooked && said == _ownText && Time.unscaledTime - _ownAt < 3f && Game.IsLocalName(senderName)) return;
+
                 float wait = Settings.ChatCooldown.Value;
                 float last;
                 if (wait > 0 && _lastCommandAt.TryGetValue(senderName, out last) && Time.unscaledTime - last < wait)
                     return;                              // quietly ignore spam
-                playerId = Game.PlayerIdByName(senderName);
-                who = senderName;
-                if (playerId == null) { Reply("Can't find a player called " + senderName + "."); return; }
+
+                // Chat only gives us a display name. Tie it to exactly one person in the lobby before giving anything.
+                Game.Member sender;
+                int matches = Game.FindMember(senderName, out sender);
+                // Playing solo there's no lobby list to match against, and anything we hear is our own line.
+                if ((matches == 1 && sender.Local) || (matches == 0 && !MoonSteamLobby.InLobby))
+                {
+                    if (sayHooked) return;               // us again
+                    fromSelf = true;                     // the sending hook is missing on this game version: handle it here
+                }
+                if (!fromSelf)
+                {
+                    if (giveable && matches != 1)
+                    {
+                        _lastCommandAt[senderName] = Time.unscaledTime;
+                        Reply(matches == 0
+                            ? "Can't find a player called " + senderName + "."
+                            : "Two players here are called " + senderName + ", so I can't tell who asked. Change one name and try again.");
+                        return;
+                    }
+                    if (Settings.ChatAllowlistOnly.Value && (matches != 1 || !Settings.OnAllowlist(sender.Name, sender.SteamId)))
+                    {
+                        if (giveable) { _lastCommandAt[senderName] = Time.unscaledTime; Reply(senderName + ": chat commands are allowlist-only in this lobby."); }
+                        return;
+                    }
+                }
+                playerId = fromSelf ? Game.PlayerId : (matches == 1 ? sender.Id : null);
+                who = fromSelf ? "you" : senderName;
             }
 
             string result = null;
@@ -81,9 +120,11 @@ namespace MoonTrainer
                     if (!Allowed(fromSelf, true)) return;
                     {
                         double amount;
-                        if (arg == null || !double.TryParse(arg.Replace(",", ""), NumberStyles.Float, CultureInfo.InvariantCulture, out amount)) { result = "Usage: " + prefix + "money 5000"; break; }
+                        if (!TryAmount(arg, out amount)) { result = "Usage: " + prefix + "money 5000"; break; }
                         if (!fromSelf)
                         {
+                            // Crewmates can only add. (Taking money away is for the host: the wallet is shared.)
+                            if (amount <= 0) { result = who + ": the amount has to be more than 0."; break; }
                             double cap = Settings.ChatMoneyCap.Value;
                             if (cap > 0 && Math.Abs(amount) > cap) amount = Math.Sign(amount) * cap;
                             double sessionCap = Settings.ChatSessionMoneyCap.Value;
@@ -134,7 +175,7 @@ namespace MoonTrainer
                     result = "Noclip " + OnOff(Cheats.Noclip); break;
                 case "flyspeed":
                     if (!fromSelf || !Settings.ChatMovement.Value) return;
-                    { float v; if (arg != null && float.TryParse(arg, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) { Cheats.FlySpeed = Math.Max(1f, v); result = "Fly speed " + Cheats.FlySpeed; } else result = "Usage: " + prefix + "flyspeed 40"; }
+                    { float v; if (arg != null && float.TryParse(arg, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && !float.IsNaN(v) && !float.IsInfinity(v)) { Cheats.FlySpeed = Mathf.Clamp(v, 1f, 500f); result = "Fly speed " + Cheats.FlySpeed; } else result = "Usage: " + prefix + "flyspeed 40"; }
                     break;
                 case "tp":
                     if (!fromSelf || !Settings.ChatMovement.Value) return;
@@ -160,6 +201,19 @@ namespace MoonTrainer
             }
         }
 
+        /// <summary>Reads "5000", "5,000", "$5000" or "2.5e3". Refuses anything that isn't a real number; caps the size.</summary>
+        static bool TryAmount(string arg, out double amount)
+        {
+            amount = 0;
+            if (string.IsNullOrEmpty(arg)) return false;
+            arg = arg.Replace(",", "").Replace("$", "").Replace(" ", "");
+            if (!double.TryParse(arg, NumberStyles.Float, CultureInfo.InvariantCulture, out amount)) return false;
+            if (double.IsNaN(amount) || double.IsInfinity(amount)) return false;
+            amount = Math.Max(-1e12, Math.Min(1e12, amount));
+            return true;
+        }
+
+        /// <summary>Commands that give something (the host carries these out for whoever typed them).</summary>
         static bool IsKnown(string cmd)
         {
             switch (cmd)

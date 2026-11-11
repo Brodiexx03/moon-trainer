@@ -45,13 +45,22 @@ namespace MoonTrainer
 
         private static bool _flyApplied, _noclipApplied, _bootsApplied, _nvApplied;
         private static float _appliedTimeSpeed = -1f;
-        private static float _landUntil;
+        private static bool _clockTouched;
+        private static IntPtr _walkerPtr;
         private static float _nextAutoSell;
+        private static bool _sellFailLogged;
         private static float _speedBeforeBoost = 1f;
+
+        // After a teleport we hover in fly mode until the ground under us has loaded (even when Fly itself is off).
+        private static bool _hover, _hoverSnap;
+        private static float _hoverUntil;
+
+        /// <summary>What DevScope should fall back to after a one-off developer call: on while flying or hovering.</summary>
+        public static bool KeepDev { get { return Fly || _hover; } }
 
         public static bool IsLocal(string playerId)
         {
-            return playerId == null || playerId == Game.PlayerId || playerId == MoonWorld.LocalPlayer;
+            return Game.IsLocalId(playerId);
         }
 
         public static void SetFly(bool on)
@@ -69,7 +78,9 @@ namespace MoonTrainer
         public static void Tick()
         {
             var walker = Game.Walker;
-            if (walker == null) { _flyApplied = _noclipApplied = false; _appliedTimeSpeed = -1f; return; }
+            if (walker == null) { ForgetApplied(); _walkerPtr = IntPtr.Zero; return; }
+            // A different walker (new session, reloaded shift): nothing has been applied to this one yet.
+            if (walker.Pointer != _walkerPtr) { _walkerPtr = walker.Pointer; ForgetApplied(); }
             Apply(walker);
 
             if (InfiniteJetpack && walker.BoostsLeft < 50) walker.BoostsLeft = 99;
@@ -78,18 +89,33 @@ namespace MoonTrainer
             {
                 _bootsApplied = GravityBoots;
                 if (GravityBoots) walker.SetGravityBoots(true);
+                else if (walker.GravityBootsOn && !walker.OwnsGravityBoots)
+                {
+                    // Switched off and the player doesn't really own them: take them off again.
+                    try { walker.SetGravityBoots(false); } catch (Exception) { }
+                    if (walker.GravityBootsOn) walker.GravityBootsOn = false;
+                }
             }
             if (NightVision != _nvApplied)
             {
                 _nvApplied = NightVision;
                 if (NightVision) walker.SetNightVision(true);
+                else if (walker.NightVisionOn && !walker.OwnsNightVision)
+                {
+                    try { walker.SetNightVision(false); } catch (Exception) { }
+                    if (walker.NightVisionOn) walker.NightVisionOn = false;
+                }
             }
 
+            // The lunar clock is only touched once a non-normal speed has been asked for, and left alone again after
+            // it's back to normal - the trainer no longer resets the game's clock at the start of every session.
             float wantSpeed = FreezeTime ? 0f : TimeSpeed;
-            if (wantSpeed != _appliedTimeSpeed)
+            if (wantSpeed != 1f) _clockTouched = true;
+            if (_clockTouched && wantSpeed != _appliedTimeSpeed)
             {
                 _appliedTimeSpeed = wantSpeed;
                 SetClockSpeed(wantSpeed);
+                if (wantSpeed == 1f) _clockTouched = false;
             }
 
             if (AutoSell && Time.unscaledTime >= _nextAutoSell)
@@ -99,29 +125,60 @@ namespace MoonTrainer
             }
 
             // Landing after a teleport: hover until the ground has streamed in, then drop.
-            if (_landUntil > 0)
+            if (_hover)
             {
                 bool found;
-                Game.Ground(walker.transform.position, out found);
-                if (found || Time.unscaledTime > _landUntil)
+                var pos = walker.transform.position;
+                var ground = Game.Ground(pos, out found);
+                if (found)
                 {
-                    _landUntil = 0;
-                    if (!Fly) { walker.SetFlying(false, false); _flyApplied = false; DevScope = false; }
+                    if (_hoverSnap)
+                    {
+                        // We arrived before the terrain existed, at a guessed height. Now that it's there, stand on it
+                        // if we ended up under it or well above it.
+                        var up = pos.normalized;
+                        float height = Vector3.Dot(pos - ground, up);
+                        if (height < 0.3f || height > 6f)
+                        {
+                            DevScope = true;
+                            try { walker.Teleport(ground + up * 1.0f, false); }
+                            catch (Exception e) { Plugin.Logger.LogWarning("Surface snap failed: " + e.Message); }
+                        }
+                    }
+                    EndHover(walker);
                 }
+                else if (Time.unscaledTime > _hoverUntil) EndHover(walker);
             }
+        }
+
+        private static void ForgetApplied()
+        {
+            _flyApplied = _noclipApplied = _bootsApplied = _nvApplied = false;
+            _appliedTimeSpeed = -1f;
+            _hover = false;
+        }
+
+        private static void EndHover(MoonWalker walker)
+        {
+            _hover = false;
+            Apply(walker);
+            DevScope = Fly;
         }
 
         private static void Apply(MoonWalker walker)
         {
             if (walker == null) return;
-            if (Fly != _flyApplied || Noclip != _noclipApplied)
+            bool wantFly = Fly || _hover;
+            bool wantNoclip = Fly && Noclip;
+            if (wantFly != _flyApplied || wantNoclip != _noclipApplied)
             {
-                _flyApplied = Fly; _noclipApplied = Noclip;
+                _flyApplied = wantFly; _noclipApplied = wantNoclip;
                 DevScope = true;
-                try { walker.SetFlying(Fly, Fly && Noclip); } finally { DevScope = Fly; }
-                MoonDevTools.Noclip = Fly && Noclip;
+                try { walker.SetFlying(wantFly, wantNoclip); } finally { DevScope = wantFly; }
+                MoonDevTools.Noclip = wantNoclip;
             }
-            if (Fly) { DevScope = true; walker.FlySpeed = FlySpeed; }
+            if (wantFly) DevScope = true;
+            if (Fly) walker.FlySpeed = FlySpeed;
         }
 
         // ---- time --------------------------------------------------------------------------------
@@ -129,7 +186,7 @@ namespace MoonTrainer
         /// <summary>Changes the lunar clock speed without the time of day jumping (clock = (Clock*speed + offset)).</summary>
         public static void SetClockSpeed(float speed)
         {
-            var sky = Game.Find<MoonSolarSystem>();
+            var sky = Game.Sky;
             if (sky == null) { MoonSolarSystem.clockSpeed = speed; return; }
             double daySeconds = sky.lunarDaySeconds > 0 ? sky.lunarDaySeconds : 3600;
             double before = sky.LunarTime;
@@ -141,7 +198,7 @@ namespace MoonTrainer
 
         public static string ShiftTime(float hours)
         {
-            var sky = Game.Find<MoonSolarSystem>();
+            var sky = Game.Sky;
             if (sky == null) return "No sky.";
             double daySeconds = sky.lunarDaySeconds > 0 ? sky.lunarDaySeconds : 3600;
             MoonSolarSystem.clockOffset += hours / 24.0 * daySeconds;
@@ -150,7 +207,7 @@ namespace MoonTrainer
 
         public static string TimeText()
         {
-            var sky = Game.Find<MoonSolarSystem>();
+            var sky = Game.Sky;
             if (sky == null) return "-";
             double h = sky.LunarTime * 24;
             return ((int)h).ToString("00") + ":" + ((int)(h % 1 * 60)).ToString("00") + (MoonSolarSystem.clockSpeed == 0 ? " (frozen)" : "");
@@ -170,20 +227,29 @@ namespace MoonTrainer
             return TeleportTo(dir * radius, "marker " + (index + 1));
         }
 
-        public static string TeleportTo(Vector3 position, string label)
+        /// <summary>
+        /// Teleports the local player. With exact, the height of the position is trusted (a saved spot, a crewmate);
+        /// otherwise the height is a guess (a landmark or marker direction) and we stand on the surface once it loads.
+        /// </summary>
+        public static string TeleportTo(Vector3 position, string label, bool exact = false)
         {
             var walker = Game.Walker;
             if (walker == null) return "Not in a game.";
             bool found;
             var ground = Game.Ground(position, out found);
             var up = position.normalized;
-            var target = (found ? ground : position) + up * (found ? 1.0f : 3.0f);
-            // Hover in fly mode until the terrain under us exists, so we don't fall through unloaded ground.
+            Vector3 target;
+            if (exact) target = position + up * 0.25f;          // someone stood exactly here (may be indoors, under a roof)
+            else if (found) target = ground + up * 1.0f;
+            else target = position + up * 3.0f;
+            // Hover in fly mode until the terrain under us exists, so we don't fall through unloaded ground. This keeps
+            // noclip as it was, and works with Fly off too (the hover flag holds fly mode until we land).
+            _hover = true;
+            _hoverSnap = !found && !exact;
+            _hoverUntil = Time.unscaledTime + 8f;
+            Apply(walker);
             DevScope = true;
-            walker.SetFlying(true, false);
-            _flyApplied = true;
             walker.Teleport(target, true);
-            _landUntil = Time.unscaledTime + 8f;
             return "Teleported to " + label;
         }
 
@@ -222,7 +288,7 @@ namespace MoonTrainer
         {
             var rp = Game.RemotePlayerByName(name);
             if (rp == null) return "Can't see " + name + " right now.";
-            return TeleportTo(rp.transform.position, rp.DisplayName);
+            return TeleportTo(rp.transform.position, rp.DisplayName, true);
         }
 
         // ---- world ---------------------------------------------------------------------------------
@@ -233,7 +299,7 @@ namespace MoonTrainer
             if (world == null || walker == null) return "Not in a game.";
             DevScope = true;
             int n;
-            try { n = world.DevCompleteRegions(walker.transform.position, rings); } finally { DevScope = Fly; }
+            try { n = world.DevCompleteRegions(walker.transform.position, rings); } finally { DevScope = KeepDev; }
             Game.MarkDirty();
             return n + " regions completed.";
         }
@@ -265,7 +331,7 @@ namespace MoonTrainer
                     }
                 }
             }
-            finally { DevScope = Fly; }
+            finally { DevScope = KeepDev; }
             Game.MarkDirty();
             return leaveOne
                 ? n + " regions completed. One section left - a marker points at it; sweep it to finish the Moon."
@@ -278,7 +344,7 @@ namespace MoonTrainer
             if (world == null) return "Not in a game.";
             bool ok;
             DevScope = true;
-            try { ok = world.DevResetDust(); } finally { DevScope = Fly; }
+            try { ok = world.DevResetDust(); } finally { DevScope = KeepDev; }
             Game.MarkDirty();
             return ok ? "Dust reset - the Moon is dirty again." : "The game refused to reset the dust.";
         }
@@ -328,7 +394,7 @@ namespace MoonTrainer
             double kg = full ? (inv != null ? inv.CapacityKg : 100) : 0;
             if (InfiniteBag && full) kg = 5000;
             DevScope = true;
-            try { world.DevSetCarriedDust(Game.PlayerId, kg); } finally { DevScope = Fly; }
+            try { world.DevSetCarriedDust(Game.PlayerId, kg); } finally { DevScope = KeepDev; }
             return full ? "Bag filled (" + kg.ToString("N0") + " kg)." : "Bag emptied.";
         }
 
@@ -352,14 +418,24 @@ namespace MoonTrainer
             if (world == null || eq == null || eq.Inventory == null) return "Not in a game.";
             double carried = eq.Inventory.Kilograms;
             if (carried <= 0.01) return report ? "Your bag is empty." : null;
-            double before = Game.Money(Game.PlayerId);
+            double before = report ? Game.Money(Game.PlayerId) : 0;
             double sold;
             try { sold = world.DepositAtStation(Game.PlayerId, 1e9); }
-            catch (Exception e) { Plugin.Logger.LogWarning("Auto-sell: " + e.Message); return "Selling failed: " + e.Message; }
+            catch (Exception e)
+            {
+                // Auto-sell retries every 2 seconds: say it once, not forever.
+                if (report || !_sellFailLogged) { _sellFailLogged = true; Plugin.Logger.LogWarning("Selling failed: " + e.Message); }
+                return "Selling failed: " + e.Message;
+            }
+            if (!report)
+            {
+                if (sold > 0) Game.MarkDirtyQuiet();
+                return null;
+            }
             if (sold > 0) Game.MarkDirty();
             double earned = Game.Money(Game.PlayerId) - before;
             string msg = "Sold " + sold.ToString("N1") + " kg" + (earned > 0 ? " for $" + earned.ToString("N0") : "") + ".";
-            if (report || sold > 0) Plugin.Logger.LogInfo(msg);
+            Plugin.Logger.LogInfo(msg);
             return msg;
         }
 
@@ -396,7 +472,7 @@ namespace MoonTrainer
             if (!AimPoint(out p)) return "Look at the ground where you want it (within 250 m).";
             int id;
             DevScope = true;
-            try { id = world.DevPlaceCatcher(Game.PlayerId, p, AimYaw()); } finally { DevScope = Fly; }
+            try { id = world.DevPlaceCatcher(Game.PlayerId, p, AimYaw()); } finally { DevScope = KeepDev; }
             if (id < 0) return "The game couldn't place a catcher there.";
             Game.MarkDirty();
             return "Catcher placed.";
@@ -410,7 +486,7 @@ namespace MoonTrainer
             if (!AimPoint(out p)) return "Look at the ground where you want it (within 250 m).";
             int id;
             DevScope = true;
-            try { id = world.DevPlaceRobotDock(Game.PlayerId, kind, p, AimYaw()); } finally { DevScope = Fly; }
+            try { id = world.DevPlaceRobotDock(Game.PlayerId, kind, p, AimYaw()); } finally { DevScope = KeepDev; }
             if (id < 0) return "The game couldn't place a " + label + " dock there.";
             Game.MarkDirty();
             return label + " robot dock placed.";
@@ -502,7 +578,7 @@ namespace MoonTrainer
             if (FreezeTime) parts.Add("TIME FROZEN");
             else if (TimeSpeed != 1f) parts.Add(TimeSpeed.ToString("0.##") + "x TIME");
             if (FlagsOnMap) parts.Add("MAP POI");
-            return string.Join("  ·  ", parts);
+            return string.Join("  |  ", parts);
         }
 
         // ---- persistence: "Name=value;Name=value" ----------------------------------------------------
@@ -525,29 +601,31 @@ namespace MoonTrainer
         public static void SetByName(string key, string value)
         {
             var c = CultureInfo.InvariantCulture;
-            bool b = value == "True"; float f; float.TryParse(value, NumberStyles.Float, c, out f);
+            bool b = string.Equals(value, "True", StringComparison.OrdinalIgnoreCase);
+            float f;
+            bool ok = float.TryParse(value, NumberStyles.Float, c, out f) && !float.IsNaN(f) && !float.IsInfinity(f);
             switch (key)
             {
                 case "Fly": Fly = b; break;
                 case "Noclip": Noclip = b; break;
-                case "FlySpeed": FlySpeed = f; break;
-                case "SpeedMult": SpeedMult = f; break;
-                case "JumpMult": JumpMult = f; break;
+                case "FlySpeed": FlySpeed = ok ? Mathf.Clamp(f, 1f, 500f) : 20f; break;
+                case "SpeedMult": SpeedMult = ok ? Mathf.Clamp(f, 0.25f, 20f) : 1f; break;
+                case "JumpMult": JumpMult = ok ? Mathf.Clamp(f, 0.25f, 20f) : 1f; break;
                 case "InfiniteJetpack": InfiniteJetpack = b; break;
                 case "GravityBoots": GravityBoots = b; break;
                 case "NightVision": NightVision = b; break;
                 case "InfiniteBag": InfiniteBag = b; break;
                 case "AutoSell": AutoSell = b; break;
-                case "PayoutMult": PayoutMult = f; break;
+                case "PayoutMult": PayoutMult = ok ? Mathf.Clamp(f, 0.25f, 100f) : 1f; break;
                 case "FreeUpgrades": FreeUpgrades = b; break;
                 case "FreeTravel": FreeTravel = b; break;
-                case "VehicleSpeedMult": VehicleSpeedMult = f; break;
-                case "BrushWidthMult": BrushWidthMult = f; break;
+                case "VehicleSpeedMult": VehicleSpeedMult = ok ? Mathf.Clamp(f, 0.25f, 20f) : 1f; break;
+                case "BrushWidthMult": BrushWidthMult = ok ? Mathf.Clamp(f, 0.25f, 20f) : 1f; break;
                 case "InfiniteHopper": InfiniteHopper = b; break;
-                case "MachineSpeed": MachineSpeed = f; break;
+                case "MachineSpeed": MachineSpeed = ok ? Mathf.Clamp(f, 0.25f, 50f) : 1f; break;
                 case "FreezeTime": FreezeTime = b; break;
-                case "TimeSpeed": TimeSpeed = f; break;
-                case "CleanRings": CleanRings = Math.Max(1, (int)f); break;
+                case "TimeSpeed": TimeSpeed = ok ? Mathf.Clamp(f, 0.25f, 50f) : 1f; break;
+                case "CleanRings": CleanRings = ok ? Mathf.Clamp((int)f, 1, 60) : 3; break;
                 case "FlagsOnMap": FlagsOnMap = b; break;
             }
         }

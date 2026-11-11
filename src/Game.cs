@@ -11,6 +11,7 @@ namespace MoonTrainer
     public static class Game
     {
         private static MoonPrototypeEquipment _equipment;
+        private static long _nextEquipmentSearch;
 
         static bool Alive(UnityEngine.Object o) { return o != null && !o.WasCollected && o; }
 
@@ -20,6 +21,10 @@ namespace MoonTrainer
             {
                 if (Alive(_equipment)) return _equipment;
                 _equipment = null;
+                // Not in a game (menus, loading): look again at most twice a second instead of on every access.
+                long now = Environment.TickCount64;
+                if (now < _nextEquipmentSearch) return null;
+                _nextEquipmentSearch = now + 500;
                 var found = UnityEngine.Object.FindObjectsByType(Il2CppType.Of<MoonPrototypeEquipment>(), FindObjectsInactive.Exclude, FindObjectsSortMode.None);
                 for (int i = 0; i < found.Length; i++)
                 {
@@ -47,6 +52,53 @@ namespace MoonTrainer
 
         public static bool IsCrewmate { get { return MoonSteamLobby.InLobby && !MoonSteamLobby.IsHost; } }
 
+        static string _idA, _idB; static long _idsAt = -100000;
+
+        /// <summary>True if a player id from the game is ours. Called from hooks on hot paths, so the ids are cached for a second.</summary>
+        public static bool IsLocalId(string playerId)
+        {
+            if (playerId == null) return true;
+            long now = Environment.TickCount64;
+            if (_idA == null || now - _idsAt > 1000)
+            {
+                _idsAt = now;
+                _idA = PlayerId;
+                try { _idB = MoonWorld.LocalPlayer; } catch (Exception) { _idB = null; }
+            }
+            return playerId == _idA || playerId == _idB;
+        }
+
+        /// <summary>True while the player is typing in the game's chat box (hotkeys must not fire then).</summary>
+        public static bool Typing
+        {
+            get
+            {
+                if (_typingBroken) return false;
+                try { return MoonInput.Typing; }
+                catch (Exception e) { _typingBroken = true; Plugin.Logger.LogWarning("Can't tell when chat is open on this game version: " + e.Message); return false; }
+            }
+        }
+        static bool _typingBroken;
+
+        /// <summary>The game's own key for a crewmate (what wallets, upgrades and landmarks are filed under).</summary>
+        public static string PlayerKey(ulong steamId)
+        {
+            try { var k = MoonCrew.PlayerId(steamId); if (!string.IsNullOrEmpty(k)) return k; }
+            catch (Exception e) { Plugin.Logger.LogWarning("MoonCrew.PlayerId failed, using the raw Steam id: " + e.Message); }
+            return steamId.ToString();
+        }
+
+        private static MoonSolarSystem _sky;
+        public static MoonSolarSystem Sky
+        {
+            get
+            {
+                if (Alive(_sky)) return _sky;
+                _sky = Find<MoonSolarSystem>();
+                return _sky;
+            }
+        }
+
         public static T Find<T>() where T : UnityEngine.Object
         {
             var found = UnityEngine.Object.FindObjectsByType(Il2CppType.Of<T>(), FindObjectsInactive.Exclude, FindObjectsSortMode.None);
@@ -71,6 +123,21 @@ namespace MoonTrainer
             catch (Exception e) { Plugin.Logger.LogWarning("Could not request a save: " + e.Message); return "Save request failed: " + e.Message; }
         }
 
+        static long _nextQuietSave;
+
+        /// <summary>For things that repeat (auto-sell): flags the change but asks for a save at most every 30 seconds.</summary>
+        public static void MarkDirtyQuiet()
+        {
+            var w = World; if (w == null) return;
+            try
+            {
+                w.progressDirty = true;
+                long now = Environment.TickCount64;
+                if (now >= _nextQuietSave) { _nextQuietSave = now + 30000; w.RequestSave(); }
+            }
+            catch (Exception) { }
+        }
+
         public static string SaveNow()
         {
             var w = World; if (w == null) return "Not in a game.";
@@ -81,12 +148,46 @@ namespace MoonTrainer
 
         // ---- money ---------------------------------------------------------------------------
 
+        static bool _decimalDirect = true;
+
         public static double ToDouble(Il2CppSystem.Decimal d)
         {
-            return double.Parse(d.ToString(), CultureInfo.InvariantCulture);
+            // Direct conversion. The old route (number -> text -> number) misread balances on PCs whose Windows
+            // region writes decimals with a comma.
+            if (_decimalDirect)
+            {
+                try { return Il2CppSystem.Decimal.ToDouble(d); }
+                catch (Exception e) { _decimalDirect = false; Plugin.Logger.LogWarning("Decimal.ToDouble unavailable, falling back to text: " + e.Message); }
+            }
+            return ParseNumber(d.ToString());
+        }
+
+        /// <summary>Parses "1234567.89", "1234567,89", "1,234,567.89" or "1.234.567,89".</summary>
+        public static double ParseNumber(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return 0;
+            text = text.Replace(" ", "").Replace("\u00A0", "").Replace("'", "");
+            int dot = text.LastIndexOf('.'), comma = text.LastIndexOf(',');
+            if (dot >= 0 && comma >= 0)
+            {
+                // Both present: whichever comes last is the decimal point.
+                if (comma > dot) text = text.Replace(".", "").Replace(',', '.');
+                else text = text.Replace(",", "");
+            }
+            else if (comma >= 0)
+            {
+                // Only commas: one comma followed by 1-2 digits (or more than 3) is a decimal comma; otherwise thousands.
+                int after = text.Length - comma - 1;
+                bool single = text.IndexOf(',') == comma;
+                text = single && after != 3 ? text.Replace(',', '.') : text.Replace(",", "");
+            }
+            double v;
+            return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) ? v : 0;
         }
 
         public static Il2CppSystem.Decimal Dec(double d) { return new Il2CppSystem.Decimal(d); }
+
+        public const double MaxMoney = 1e15;
 
         public static double Money(string playerId)
         {
@@ -106,6 +207,8 @@ namespace MoonTrainer
         public static double SetMoney(string playerId, double dollars)
         {
             var w = World; if (w == null) throw new InvalidOperationException("Not in a game.");
+            if (double.IsNaN(dollars) || double.IsInfinity(dollars)) throw new ArgumentException("That isn't an amount.");
+            dollars = Math.Max(0, Math.Min(MaxMoney, dollars));     // never below zero, never past what the game can store
             double before = Money(playerId);
             w.SetTeamDollars(Dec(dollars));
             double after = Money(playerId);
@@ -114,7 +217,7 @@ namespace MoonTrainer
                 // Team setter had no effect; use the developer path with the dev switch forced on.
                 Cheats.DevScope = true;
                 try { w.DevAddMoney(playerId, Dec(dollars - before)); }
-                finally { Cheats.DevScope = false; }
+                finally { Cheats.DevScope = Cheats.KeepDev; }
                 after = Money(playerId);
             }
             MarkDirty();
@@ -142,7 +245,7 @@ namespace MoonTrainer
                         {
                             var m = asList[i];
                             if (m == null) continue;
-                            list.Add(new Member { Id = m.id.ToString(), Name = m.name, Local = m.local, SteamId = m.id });
+                            list.Add(new Member { Id = m.local ? PlayerId : PlayerKey(m.id), Name = m.name, Local = m.local, SteamId = m.id });
                         }
                     }
                     else
@@ -153,7 +256,7 @@ namespace MoonTrainer
                         {
                             var m = e.Current;
                             if (m == null) continue;
-                            list.Add(new Member { Id = m.id.ToString(), Name = m.name, Local = m.local, SteamId = m.id });
+                            list.Add(new Member { Id = m.local ? PlayerId : PlayerKey(m.id), Name = m.name, Local = m.local, SteamId = m.id });
                         }
                     }
                 }
@@ -168,6 +271,43 @@ namespace MoonTrainer
             foreach (var m in Members())
                 if (string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase)) return m.Id;
             return null;
+        }
+
+        /// <summary>
+        /// Finds the lobby member using a display name and returns how many members use it. Chat only tells us the
+        /// name, so anything other than exactly one match can't be trusted to be a particular person.
+        /// </summary>
+        public static int FindMember(string name, out Member member)
+        {
+            member = default(Member);
+            int n = 0;
+            foreach (var m in Members())
+                if (string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase)) { if (n == 0) member = m; n++; }
+            return n;
+        }
+
+        /// <summary>True if this display name is ours (or we're alone, so it can only be us).</summary>
+        public static bool IsLocalName(string name)
+        {
+            var members = Members();
+            if (members.Count <= 1) return true;
+            foreach (var m in members)
+                if (m.Local && string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>True if the lobby's host is running the trainer (1.1 or newer), so it will carry out give-type chat commands.</summary>
+        public static bool HostHasTrainer()
+        {
+            try
+            {
+                if (!MoonSteamLobby.InLobby) return false;
+                ulong host = MoonSteamLobby.HostId;
+                if (host == 0) return false;
+                var v = Steamworks.SteamMatchmaking.GetLobbyMemberData(new Steamworks.CSteamID(MoonSteamLobby.LobbyId), new Steamworks.CSteamID(host), VersionKey);
+                return !string.IsNullOrEmpty(v);
+            }
+            catch (Exception) { return false; }
         }
 
         // ---- upgrades ------------------------------------------------------------------------------
@@ -226,8 +366,22 @@ namespace MoonTrainer
                 if (lobby == 0 || lobby == _announcedLobby) return;
                 Steamworks.SteamMatchmaking.SetLobbyMemberData(new Steamworks.CSteamID(lobby), VersionKey, Plugin.Version);
                 _announcedLobby = lobby;
+                try
+                {
+                    var sb = new System.Text.StringBuilder("Lobby joined as " + (MoonSteamLobby.IsHost ? "host" : "crewmate") + ". Player keys: local='" + Mask(PlayerId) + "'");
+                    foreach (var m in Members()) sb.Append(", " + m.Name + (m.Local ? " (you)" : "") + "='" + Mask(m.Id) + "'");
+                    Plugin.Logger.LogInfo(sb.ToString());
+                }
+                catch (Exception) { }
             }
             catch (Exception e) { Plugin.Logger.LogWarning("Could not publish trainer version: " + e.Message); _announcedLobby = MoonSteamLobby.LobbyId; }
+        }
+
+        /// <summary>Hides the middle of a long id in the log ("7656...4821").</summary>
+        static string Mask(string id)
+        {
+            if (string.IsNullOrEmpty(id) || id.Length < 10) return id;
+            return id.Substring(0, 4) + "..." + id.Substring(id.Length - 4) + " (" + id.Length + " chars)";
         }
 
         /// <summary>The trainer version a lobby member is running, or null if they don't have it (or have 1.0, which didn't publish it).</summary>
@@ -402,10 +556,13 @@ namespace MoonTrainer
             var up = point.normalized;
             float best = float.MaxValue; Vector3 hitPoint = point; found = false;
             var hits = Physics.RaycastAll(point + up * 60f, -up, 200f, ~0, QueryTriggerInteraction.Ignore);
+            var walker = Walker;
+            Transform self = walker == null ? null : walker.transform;
             for (int i = 0; i < hits.Length; i++)
             {
                 var h = hits[i];
                 if (h.collider == null || h.collider.attachedRigidbody != null) continue;
+                if (self != null && h.collider.transform.IsChildOf(self)) continue;      // our own body isn't ground
                 if (h.distance < best) { best = h.distance; hitPoint = h.point; found = true; }
             }
             return hitPoint;
