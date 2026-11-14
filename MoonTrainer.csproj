@@ -8,8 +8,9 @@
     The game needs MSML installed and to have been started once, so that BepInEx\interop exists.
     The DLL lands in bin\. Copy it and Mods\MoonTrainer\mod.json into <game>\Mods\MoonTrainer\ to try it.
 
-    Note: the releases so far were compiled with the Roslyn compiler directly, against the same references listed
-    here. This project file has not been run through "dotnet build" yet, so treat the first run as a test.
+    Note: the releases so far were compiled with Mono's mcs, against the same references listed here, so the source
+    stays inside C# 6. It also compiles cleanly with Roslyn's csc at -langversion:6 against these references, but this
+    project file itself has not been run through "dotnet build" yet, so treat the first run as a test.
   -->
   <PropertyGroup>
     <GameDir Condition="'$(GameDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Moon Sweepers</GameDir>

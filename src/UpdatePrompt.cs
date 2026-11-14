@@ -25,7 +25,9 @@ namespace MoonTrainer
             if (state != _lastState)
             {
                 _lastState = state;
-                if (Game.InGame && (state == Updates.Done || state == Updates.Failed)) Trainer.Notice(Updates.Status);
+                // (a failure that left the new DLL behind has to say so here too, not only in the message box)
+                if (Game.InGame && (state == Updates.Done || state == Updates.Failed))
+                    Trainer.Notice(state == Updates.Failed && Updates.HalfInstalled != null ? Updates.Status + " " + Updates.Aftermath : Updates.Status);
             }
             if (_broken || Updates.Available == null || Game.InGame) return;
 
@@ -94,7 +96,12 @@ namespace MoonTrainer
                 else if (state == Updates.Failed)
                 {
                     _failShown = true;
-                    dialog.Show("Update not installed", Updates.Status + " Nothing was changed. You can try again, or update with the PowerShell command instead.",
+                    // Updates.Aftermath is "Nothing was changed." only when that's so; otherwise it says what was.
+                    bool half = Updates.HalfInstalled != null;
+                    dialog.Show(half ? "Update partly installed" : "Update not installed",
+                        Updates.Status + " " + Updates.Aftermath
+                            + (half ? " It will still load at the next start. Try again to finish the job, or close the game and use the PowerShell command."
+                                : " You can try again, or update with the PowerShell command instead."),
                         "TRY AGAIN", Act(() => { dialog.Hide(); _startRequested = true; }),
                         "CLOSE", Act(() => dialog.Hide()));
                     _ours = true;

@@ -62,26 +62,36 @@ namespace MoonTrainer
 
         // ---- unlimited bag and hopper ----
 
+        // The bag hooks leave a crewmate's bag alone. Game 1.0.5 only ever asks these about our own bag (through the
+        // local player's MoonDustInventory), so this guards against a game update asking for someone else's. They
+        // test "not a crewmate's" rather than "ours": an id we fail to recognise must never switch the cheat off.
+
         [HarmonyPatch(typeof(MoonDustInventory), nameof(MoonDustInventory.CapacityKg), MethodType.Getter)]
         [HarmonyPostfix]
-        static void BagCapacity(ref double __result)
+        static void BagCapacity(MoonDustInventory __instance, ref double __result)
         {
-            if (Cheats.InfiniteBag) __result = Math.Max(__result, 1000000);
+            if (Cheats.InfiniteBag && Cheats.NotCrewmate(Game.BagOwner(__instance))) __result = Math.Max(__result, 1000000);
         }
 
         [HarmonyPatch(typeof(MoonDustInventory), nameof(MoonDustInventory.IsFull), MethodType.Getter)]
         [HarmonyPostfix]
-        static void BagFull(ref bool __result)
+        static void BagFull(MoonDustInventory __instance, ref bool __result)
         {
-            if (Cheats.InfiniteBag) __result = false;
+            if (__result && Cheats.InfiniteBag && Cheats.NotCrewmate(Game.BagOwner(__instance))) __result = false;
         }
 
         [HarmonyPatch(typeof(MoonWorld), nameof(MoonWorld.InventoryFull))]
         [HarmonyPostfix]
-        static void WorldBagFull(ref bool __result)
+        static void WorldBagFull(string playerId, ref bool __result)
         {
-            if (Cheats.InfiniteBag) __result = false;
+            if (__result && Cheats.InfiniteBag && Cheats.NotCrewmate(playerId)) __result = false;
         }
+
+        // The hopper, vehicle speed and vehicle brush hooks are NOT limited to one player or vehicle, on purpose.
+        // The game only runs them for a MoonPrototypeVehicle, which is a vehicle this game is driving itself: ours,
+        // or a crewmate's we have taken over. A vehicle a crewmate drives is a MoonRemoteVehicle here and never comes
+        // through (checked against game 1.0.5). Narrowing them to "the one I'm sitting in" would only switch the
+        // cheat off for a vehicle we parked or were handed. The menu says so (Trainer.DustPage).
 
         [HarmonyPatch(typeof(MoonPrototypeVehicle), nameof(MoonPrototypeVehicle.DustCapacityKg), MethodType.Getter)]
         [HarmonyPostfix]
@@ -139,7 +149,7 @@ namespace MoonTrainer
             return false;
         }
 
-        // ---- vehicles ----
+        // ---- vehicles (every vehicle this game is driving - see the note above the hopper hooks) ----
 
         [HarmonyPatch(typeof(MoonWorld), nameof(MoonWorld.VehicleSpeedFactor))]
         [HarmonyPostfix]
@@ -155,7 +165,7 @@ namespace MoonTrainer
             if (Cheats.BrushWidthMult != 1f) __result *= Cheats.BrushWidthMult;
         }
 
-        // ---- machines ----
+        // ---- machines (world-wide by nature: one clock steps every machine, so a host speeds up the whole crew's) ----
 
         [HarmonyPatch(typeof(MoonWorld), nameof(MoonWorld.StepProduction))]
         [HarmonyPrefix]

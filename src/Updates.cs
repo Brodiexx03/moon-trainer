@@ -31,6 +31,24 @@ namespace MoonTrainer
         public static volatile string Status = "";
         /// <summary>The version that was just installed and is waiting for a restart.</summary>
         public static volatile string Installed;
+        /// <summary>
+        /// Set when an install stopped half-way and couldn't be undone: this version's DLL is in place but its mod.json
+        /// isn't. Null otherwise: a failed install has then left the installed files exactly as they were.
+        /// </summary>
+        public static volatile string HalfInstalled;
+
+        /// <summary>
+        /// What a failed install left behind, in one sentence. Every place that reports a failure adds this instead of
+        /// wording of its own, so "nothing was changed" is only ever said when it's true.
+        /// </summary>
+        public static string Aftermath
+        {
+            get
+            {
+                string half = HalfInstalled;
+                return half == null ? "Nothing was changed." : "Version " + half + "'s DLL is in place, but not its mod.json.";
+            }
+        }
 
         sealed class Problem : Exception { public Problem(string message) : base(message) { } }
 
@@ -139,7 +157,11 @@ namespace MoonTrainer
         {
             Status = why;
             State = Failed;
-            Plugin.Logger.LogWarning("Update not installed: " + why + " Nothing was changed. You can still update with PowerShell: " + InstallCommand);
+            if (HalfInstalled == null)
+                Plugin.Logger.LogWarning("Update not installed: " + why + " " + Aftermath + " You can still update with PowerShell: " + InstallCommand);
+            else
+                Plugin.Logger.LogWarning("Update only partly installed: " + why + " " + Aftermath
+                    + " The new version will still load at the next start. To finish the job, try again, or close the game and use PowerShell: " + InstallCommand);
         }
 
         static async Task Install()
@@ -163,11 +185,11 @@ namespace MoonTrainer
 
                 var json = await http.GetStringAsync(from + "/version.json" + bust);
                 var v = Regex.Match(json, "\"version\"\\s*:\\s*\"([^\"]+)\"");
-                var want = Regex.Match(json, "\"sha256\"\\s*:\\s*\"([0-9A-Fa-f]{64})\"");
+                var want = Regex.Match(json, "\"sha256\"\\s*:\\s*\"\\s*([0-9A-Fa-f]{64})\\s*\"");    // (spaces allowed, as install.ps1 and the release check allow them)
                 if (!v.Success) throw new Problem("The release information on GitHub couldn't be read.");
                 string version = v.Groups[1].Value;
                 if (!IsNewer(version, Plugin.Version)) throw new Problem("You already have the newest version (" + Plugin.Version + ").");
-                if (!want.Success) throw new Problem("This release has no checksum, so it can't be installed from inside the game.");
+                if (!want.Success) throw new Problem("This release has no checksum yet, so it can't be installed. Try again later.");
 
                 Status = "Downloading version " + version + "...";
                 byte[] dll = await http.GetByteArrayAsync(from + "/Mods/MoonTrainer/MoonTrainer.dll" + bust);
@@ -183,29 +205,98 @@ namespace MoonTrainer
                     throw new Problem("The download was a mix of two versions. Try again in a few minutes.");
 
                 Status = "Installing version " + version + "...";
-                string dir = ModDir;
-                Directory.CreateDirectory(dir);
-                string target = Path.Combine(dir, "MoonTrainer.dll"), temp = target + ".download", previous = target + ".previous";
-                try
-                {
-                    File.WriteAllBytes(temp, dll);
-                    // Read it back: an antivirus or a full disk can leave a cut-off file behind.
-                    if (!string.Equals(Hash(File.ReadAllBytes(temp)), want.Groups[1].Value, StringComparison.OrdinalIgnoreCase))
-                        throw new Problem("The file didn't save correctly (an antivirus may have blocked it).");
-                    if (File.Exists(target)) File.Copy(target, previous, true);       // one step back, in case it's ever needed
-                    File.Copy(temp, target, true);
-                    File.SetLastWriteTimeUtc(target, DateTime.UtcNow);                // so the mod loader sees it as changed
-                    File.WriteAllBytes(Path.Combine(dir, "mod.json"), mod);
-                }
-                finally
-                {
-                    try { if (File.Exists(temp)) File.Delete(temp); } catch (Exception) { }
-                }
+                PutInPlace(ModDir, dll, mod, want.Groups[1].Value, version);
 
                 Installed = version;
                 Status = "Moon Trainer " + version + " is installed. Restart the game to start using it.";
                 State = Done;
                 Plugin.Logger.LogWarning("Moon Trainer " + version + " installed (you're running " + Plugin.Version + " until the game restarts).");
+            }
+        }
+
+        /// <summary>
+        /// Swaps a checked download in for the installed DLL and mod.json, as close to all-or-nothing as plain files allow.
+        /// Everything is made ready next to the installed files first. The swap itself is then two renames, and if the
+        /// second can't be done the first is undone, so the DLL and its description always belong to the same version.
+        /// </summary>
+        static void PutInPlace(string dir, byte[] dll, byte[] mod, string hash, string version)
+        {
+            Directory.CreateDirectory(dir);
+            string target = Path.Combine(dir, "MoonTrainer.dll"), temp = target + ".download", previous = target + ".previous", old = target + ".old";
+            string json = Path.Combine(dir, "mod.json"), tempJson = json + ".download";
+            bool spare = false, stays = false, keepOld = false;
+            try
+            {
+                File.WriteAllBytes(temp, dll);
+                File.WriteAllBytes(tempJson, mod);
+                // Read them back: an antivirus or a full disk can leave a cut-off file behind.
+                if (!string.Equals(Hash(File.ReadAllBytes(temp)), hash, StringComparison.OrdinalIgnoreCase)
+                    || Hash(File.ReadAllBytes(tempJson)) != Hash(mod))
+                    throw new Problem("The file didn't save correctly (an antivirus may have blocked it).");
+                File.SetLastWriteTimeUtc(temp, DateTime.UtcNow);                      // so the mod loader sees it as changed
+
+                // If an earlier try stopped half-way, this very DLL is already in place and only mod.json is still to
+                // come: leave it, and leave the ".previous" from that try alone too.
+                bool had = File.Exists(target);
+                bool swap = !had || !string.Equals(Hash(File.ReadAllBytes(target)), hash, StringComparison.OrdinalIgnoreCase);
+                // A spare copy of the DLL that's installed now. It goes back if the swap can't be finished, and becomes
+                // ".previous" once it has; until then the ".previous" that's there stays as it is.
+                spare = swap && had;
+                if (spare) File.Copy(target, old, true);
+
+                // Nothing that's installed has been touched up to here. A rename either happens or it doesn't, and can't
+                // run out of disk half-way, so from here on MoonTrainer.dll is always a whole file: the old one or the new.
+                if (swap) Move(temp, target);
+                stays = true;
+                try { Move(tempJson, json); }
+                catch (Exception)
+                {
+                    // The new DLL is in but its description isn't. Put the old DLL back so the two still belong together.
+                    if (swap)
+                    {
+                        try
+                        {
+                            if (had) Move(old, target); else File.Delete(target);
+                            stays = false;
+                        }
+                        catch (Exception) { }
+                    }
+                    if (stays) HalfInstalled = version;
+                    throw;
+                }
+                HalfInstalled = null;
+            }
+            finally
+            {
+                if (spare && stays)
+                {
+                    // One step back, in case it's ever needed: the DLL the new one replaced.
+                    try { Move(old, previous); }
+                    catch (Exception)
+                    {
+                        keepOld = true;     // better left next to it under this name than thrown away
+                        Plugin.Logger.LogInfo("The version you had couldn't be kept as MoonTrainer.dll.previous, so it's MoonTrainer.dll.old instead.");
+                    }
+                }
+                try { if (File.Exists(temp)) File.Delete(temp); } catch (Exception) { }
+                try { if (File.Exists(tempJson)) File.Delete(tempJson); } catch (Exception) { }
+                try { if (!keepOld && File.Exists(old)) File.Delete(old); } catch (Exception) { }
+            }
+        }
+
+        /// <summary>Renames a file over another. An antivirus can hold a file for a moment, so it tries a few times.</summary>
+        static void Move(string from, string to)
+        {
+            for (int tries = 1; ; tries++)
+            {
+                try { File.Move(from, to, true); return; }
+                catch (IOException) { if (tries >= 4) throw; }
+                catch (UnauthorizedAccessException)
+                {
+                    // Windows says "access denied" for a file that's open somewhere else too, so don't blame the folder.
+                    if (tries >= 4) throw new Problem("Windows wouldn't let the trainer replace " + Path.GetFileName(to) + " (another program may have it open).");
+                }
+                Task.Delay(250).Wait();
             }
         }
 

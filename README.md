@@ -43,7 +43,7 @@ The window springs open, cards rise in one after another, buttons lift and flash
 - **Flags & sites:** show them on the map, browse unraised ones nearest-first with Go / Raise, raise all.
 - **Teleport:** nearest flag or site, any map marker, any crewmate.
 - **Saved locations:** save the spot you're standing on (auto-named after the nearest landmark, or `!save base` in chat) and teleport back any time. Stored per save slot.
-- **Backups:** make one of the game's full backups on demand, and restore any of the last 8 (your current state is backed up first, then the shift reloads).
+- **Backups:** make one of the game's full backups on demand, and restore any of the last 10 (your current state is saved and backed up first, then the shift reloads).
 - **Build:** place a dust catcher or robot dock (Mk I, Mk II, Joonas) where you're looking.
 - **Crew (host):** give money, upgrades, flags and sites to any crewmate, and see who has the trainer and whether they're up to date, with a button to post them the install link.
 - **Chat:** allowlist (tied to each player's Steam account, not just their name), per-player cooldown and money limit, welcome message for new joiners.
@@ -84,7 +84,7 @@ These only work for players who also have the trainer installed (movement runs o
 ## Notes
 
 - Everyone in the lobby sees the *effects* (you flying, the wallet changing). Only you see the menu.
-- The host owns wallets and upgrades, so give-commands only work when the player with the trainer is hosting. If you join someone else's lobby with the trainer, the money, world, build, crew and backup pages show a reminder of that.
+- The host owns wallets and upgrades, so give-commands only work when the player with the trainer is hosting. Typed by a crewmate whose host has no trainer, a give-command is only tried on that crewmate's own PC, and the notice says it may not stick. If you join someone else's lobby with the trainer, the money, world, build, crew and backup pages show a reminder of that.
 - Each feature hooks into the game separately. If a game update breaks one, the console and the Home tab name the features that are off, and the rest keep working.
 - If two people in the lobby have the same name, give-commands from that name are refused, because chat only tells the trainer the name.
 
@@ -99,7 +99,7 @@ dotnet build -c Release -p:GameDir="D:\SteamLibrary\steamapps\common\Moon Sweepe
 
 The DLL lands in `bin\`. Copy it and `Mods\MoonTrainer\mod.json` into `<game>\Mods\MoonTrainer\` to try it.
 
-The published builds so far were compiled with the Roslyn compiler directly against the same references, so the first `dotnet build` of `MoonTrainer.csproj` is itself a test.
+The published builds so far were compiled with Mono's `mcs` against the same references, so the source stays inside C# 6. It also compiles cleanly with Roslyn's `csc` at `-langversion:6` against the references the project file lists, but `dotnet build` on `MoonTrainer.csproj` itself has not been run yet, so treat the first run as a test.
 
 ## Releasing
 
@@ -107,13 +107,14 @@ The published builds so far were compiled with the Roslyn compiler directly agai
 2. Build, and check the DLL really reports the new version (start the game once and read the console line).
 3. Copy the DLL to `Mods/MoonTrainer/MoonTrainer.dll`.
 4. Update `version.json`: the version, a one-line note, and the DLL's checksum from `(Get-FileHash Mods\MoonTrainer\MoonTrainer.dll).Hash`. The installer refuses a download whose checksum doesn't match, so a stale or cut-off file can't be installed.
-5. Push to a test branch first and install from it on one PC:
+5. Run `powershell -ExecutionPolicy Bypass -File tools\check-release.ps1`. It only reads files, and fails if the four version numbers differ, if the checksum in `version.json` isn't the DLL's, or if the DLL was built from older sources.
+6. Push to a test branch first and install from it on one PC:
 
    ```powershell
    $env:MOONTRAINER_BRANCH = "test-1.3"
    irm https://raw.githubusercontent.com/Brodiexx03/moon-trainer/test-1.3/install.ps1 | iex
    ```
 
-6. Play with it. When it's good, merge the branch into `main`. Everyone on an older version gets the update message next time they start the game; nothing installs until they choose to.
+7. Play with it. When it's good, merge the branch into `main`. Everyone on an older version gets the update message next time they start the game; nothing installs until they choose to.
 
 To try the in-game update message itself before a release, put the next version on a test branch and create `Mods\MoonTrainer\update-branch.txt` on one PC containing just the branch name. That PC then checks and installs from that branch instead of `main`. Delete the file to go back.

@@ -63,6 +63,15 @@ namespace MoonTrainer
             return Game.IsLocalId(playerId);
         }
 
+        /// <summary>
+        /// For hooks that must never switch off for us: true unless the id is a crewmate's. An id nobody recognises
+        /// counts as ours, so playing alone is exactly as before and only a known crewmate is left out.
+        /// </summary>
+        public static bool NotCrewmate(string playerId)
+        {
+            return Game.IsLocalId(playerId) || !Game.IsCrewmateId(playerId);
+        }
+
         public static void SetFly(bool on)
         {
             Fly = on;

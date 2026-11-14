@@ -79,7 +79,7 @@ namespace MoonTrainer
         readonly List<Action> _refreshers = new List<Action>();       // current page
         readonly List<Action> _chrome = new List<Action>();           // sidebar, header (built once)
         float _nextRefresh, _toastUntil, _nextPersist, _nextAnnounce;
-        bool _rebuildPending; float _rebuildPendingAt;
+        bool _rebuildPending;
         string _tab = "Home";
 
         // ---- effects (all optional: Settings > Menu animations switches them off, and so does any of them failing) ----
@@ -127,6 +127,7 @@ namespace MoonTrainer
 
         // things that force a rebuild when they change
         int _waypointRevision = -1, _landmarkRevision = -1, _locationCount = -1;
+        int _backupRevision = -1;
         bool _updateShown;
 
         // data cached per rebuild
@@ -141,7 +142,13 @@ namespace MoonTrainer
 
         static string _notice; static float _noticeUntil;
         public static void Notice(string text) { _notice = text; _noticeUntil = Time.unscaledTime + 5f; Plugin.Logger.LogInfo(text); }
-        public static void MembersChanged() { if (_instance != null) _instance._rebuildPending = true; }
+        /// <summary>The lobby's crew changed. Only the pages that list people are redrawn; the rest keep their scroll position.</summary>
+        public static void MembersChanged()
+        {
+            if (_instance == null) return;
+            string tab = _instance._tab;
+            if (tab == "Crew" || tab == "Chat" || tab == "Teleport") _instance._rebuildPending = true;
+        }
 
         bool _chimed; float _chimeAt;
 
@@ -258,7 +265,6 @@ namespace MoonTrainer
                     var walker = Game.Walker;
                     if (walker != null && !_uiBlocked) { walker.UIBlocked = true; _uiBlocked = true; }
                     Drag();
-                    if (_rebuildPendingAt > 0 && Time.unscaledTime >= _rebuildPendingAt) { _rebuildPendingAt = 0; _rebuildPending = true; }
                     if (_rebuildPending) { _rebuildPending = false; Rebuild(); }
                     if (Time.unscaledTime >= _nextRefresh) Refresh();
                     UpdateToast();
@@ -585,6 +591,9 @@ namespace MoonTrainer
             bottom.anchorMin = bottom.anchorMax = new Vector2(0, 0); bottom.pivot = new Vector2(0, 0);
             bottom.anchoredPosition = new Vector2(24, 20);
             _hudNotice = AddText(bottom.gameObject, 17, true, Cream, TextAlignmentOptions.BottomLeft);
+            // Notices are messages, never markup, and many of them name a crewmate or repeat a chat reply. With rich
+            // text off, whatever is in them is shown exactly as written.
+            _hudNotice.richText = false;
         }
 
         // ---- building the window -----------------------------------------------------------------------
@@ -682,7 +691,7 @@ namespace MoonTrainer
             Text(_panel, "MOON TRAINER", 52, 14, Side - 60, 20, 15, true, Cream, TextAlignmentOptions.MidlineLeft).characterSpacing = 3;
             Text(_panel, "v" + Plugin.Version, 52, 33, Side - 60, 16, 11, false, Dim, TextAlignmentOptions.MidlineLeft);
 
-            // tabs: one highlight and one orange bar that glide to the active tab (see Animate)
+            // tabs: one highlight and one purple bar that glide to the active tab (see Animate)
             float ty = Head + 12;
             _tabGlow = Glow(_panel, -4, ty - 4, 34, 42, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.2f), 1f);
             _tabHi = Box(_panel, "TabHighlight", 10, ty, Side - 20, 34, new Color(1, 1, 1, 0.06f), 8).rectTransform;
@@ -757,6 +766,7 @@ namespace MoonTrainer
             _toastRt = toast.rectTransform;
             Box(toast.transform, "ToastAccent", 0, 0, 4, 38, AccentSoft, 2);
             _toastText = Text(toast.transform, "", 16, 0, CW - 28, 38, 13, true, Cream, TextAlignmentOptions.MidlineLeft);
+            _toastText.richText = false;   // like the notice line: results name players and saved spots, none is markup
             _toastBar = Box(toast.transform, "ToastTime", 14, 35, CW - 28, 2, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.8f), 1).rectTransform;
             try
             {
@@ -814,9 +824,20 @@ namespace MoonTrainer
             _waypointRevision = world == null ? -1 : world.WaypointRevision;
             _landmarkRevision = world == null ? -1 : world.LandmarkRevision;
             _locationCount = Locations.All().Count;
+            _backupRevision = Game.BackupRevision;
             _updateShown = Updates.Available != null;
+            // "Give to" stays on the same person when the crew list changes around them (someone joining or leaving
+            // moves everyone's place in it). If they have left, it goes back to you, not to whoever took their place.
+            var picked = CurrentMember();
             _members = Game.Members();
-            if (_memberIndex >= _members.Count) _memberIndex = 0;
+            int self = 0, same = -1;
+            for (int i = 0; i < _members.Count; i++)
+            {
+                var m = _members[i];
+                if (m.Local) self = i;
+                if (same < 0 && (picked.Local ? m.Local : !m.Local && (picked.SteamId != 0 ? m.SteamId == picked.SteamId : m.Id == picked.Id))) same = i;
+            }
+            _memberIndex = same >= 0 ? same : self;
 
             float y = 18;
             _x = CP; _w = CW;
@@ -876,7 +897,7 @@ namespace MoonTrainer
                     {
                         case Updates.Working: status.text = Updates.Status; break;
                         case Updates.Done: status.text = "<color=#5BC985>Installed.</color>  Restart the game to start using " + Updates.Installed + "."; break;
-                        case Updates.Failed: status.text = "<color=#FF9A4D>Not installed:</color>  " + Updates.Status; break;
+                        case Updates.Failed: status.text = Updates.HalfInstalled != null ? "<color=#FF9A4D>Partly installed:</color>  " + Updates.Aftermath : "<color=#FF9A4D>Not installed:</color>  " + Updates.Status; break;
                         default: status.text = "Click Update now and it installs by itself. The game needs a restart afterwards."; break;
                     }
                 });
@@ -907,7 +928,7 @@ namespace MoonTrainer
             var p = Card(ref y, "Presets");
             Buttons(ref y, new[] { "Exploring", "Grinding", "Building" }, new Func<string>[] {
                 () => Cheats.Preset("explore"), () => Cheats.Preset("grind"), () => Cheats.Preset("build") });
-            Hint(ref y, "Exploring: fly + noclip, night vision, frozen time, flags on the map.   Grinding: 5x money, wide brush, big bag, fast machines.   Building: fly, free upgrades, fast machines.");
+            Hint(ref y, "Exploring: fly + noclip, night vision, frozen time, flags on the map.   Grinding: 5x money, wide brush, big bag, fast machines.   Building: fly, free upgrades, fast machines.   Fast machines speed up the whole crew's machines when you host.");
             EndCard(p, ref y);
 
             var q = Card(ref y, "Quick toggles");
@@ -978,14 +999,15 @@ namespace MoonTrainer
                 () => Cheats.SetCarried(true), () => Cheats.SetCarried(false), () => Cheats.SellCarried(true) });
             EndCard(b, ref y);
 
-            var v = Card(ref y, "Vehicle");
+            var veh = Card(ref y, "Vehicle");
             Stepper(ref y, "Speed", () => Cheats.VehicleSpeedMult, x => Cheats.VehicleSpeedMult = Mathf.Clamp(x, 0.25f, 20), 0.5f, "0.0#", "x");
             Stepper(ref y, "Brush width", () => Cheats.BrushWidthMult, x => Cheats.BrushWidthMult = Mathf.Clamp(x, 0.25f, 20), 0.5f, "0.0#", "x");
             Switch(ref y, "Unlimited hopper", null, () => Cheats.InfiniteHopper, x => Cheats.InfiniteHopper = x);
             y += 4;
             Buttons(ref y, new[] { "Fill hopper", "Empty hopper" }, new Func<string>[] {
                 () => Cheats.SetHopper(true), () => Cheats.SetHopper(false) });
-            EndCard(v, ref y);
+            Hint(ref y, "Speed and unlimited hopper apply to every vehicle you drive, including a crewmate's you have taken over. Brush width also widens your hand brush. Vehicles your crewmates drive are not changed.");
+            EndCard(veh, ref y);
         }
 
         [HideFromIl2Cpp]
@@ -1003,6 +1025,7 @@ namespace MoonTrainer
 
             var m = Card(ref y, "Machines");
             Stepper(ref y, "Machine speed", () => Cheats.MachineSpeed, v => Cheats.MachineSpeed = Mathf.Clamp(v, 0.25f, 50), 1f, "0.0#", "x");
+            Hint(ref y, "Every machine on the Moon - when you host, that is the whole crew's machines too.");
             EndCard(m, ref y);
 
             var c = Card(ref y, "Cleaning");
@@ -1139,7 +1162,7 @@ namespace MoonTrainer
         {
             var s = Card(ref y, "Give to");
             var pick = Buttons(ref y, new[] { "" }, new Func<string>[] { () => { _memberIndex = (_memberIndex + 1) % Math.Max(1, _members.Count); return null; } });
-            _refreshers.Add(() => pick[0].text = CurrentMember().Name + "   <color=#8B91A0><size=12>click to change</size></color>");
+            _refreshers.Add(() => pick[0].text = Plain(CurrentMember().Name) + "   <color=#8B91A0><size=12>click to change</size></color>");
             Buttons(ref y, new[] { "+10k", "+100k", "+1M" }, new Func<string>[] { () => Give(10000), () => Give(100000), () => Give(1000000) }, Accent);
             Buttons(ref y, new[] { "Jetpack", "Boots", "Night vis", "Belt" }, new Func<string>[] {
                 () => GiveUp("gear.jetpack"), () => GiveUp("gear.boots"), () => GiveUp("gear.nightvision"), () => GiveUp("gear.belt") });
@@ -1154,7 +1177,7 @@ namespace MoonTrainer
             foreach (var m in _members)
             {
                 var mm = m;
-                var name = Text(_host, mm.Name + (mm.Local ? "  <color=#8B91A0><size=12>you</size></color>" : ""), _x, y, _w - 230, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+                var name = Text(_host, Plain(mm.Name) + (mm.Local ? "  <color=#8B91A0><size=12>you</size></color>" : ""), _x, y, _w - 230, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
                 var chip = Box(_host, "Chip", _x + _w - 220, y + 7, 120, 22, Off, pill: true);
                 var chipText = Text(chip.transform, "", 0, 0, 120, 22, 11, true, Cream, TextAlignmentOptions.Center);
                 float nextPoll = 0;
@@ -1165,11 +1188,15 @@ namespace MoonTrainer
                     string v = Game.TrainerVersionOf(mm);
                     string latest = Updates.Latest ?? Plugin.Version;
                     if (Updates.IsNewer(Plugin.Version, latest)) latest = Plugin.Version;
+                    // Each player's own game writes its version on the lobby, so it's their text, not ours: short and plain.
+                    string shown = v == null ? null : Plain(v.Length > 12 ? v.Substring(0, 12) : v);
                     if (v == null) { chip.color = Off; chipText.text = "NOT DETECTED"; }
-                    else if (Updates.IsNewer(latest, v)) { chip.color = Hex("8A5A12"); chipText.text = "v" + v + "  OLD"; }
-                    else { chip.color = Hex("1F5A38"); chipText.text = "v" + v; }
+                    else if (Updates.IsNewer(latest, v)) { chip.color = Hex("8A5A12"); chipText.text = "v" + shown + "  OLD"; }
+                    else { chip.color = Hex("1F5A38"); chipText.text = "v" + shown; }
                 });
-                if (!mm.Local) SmallButton(_x + _w - 90, y, 90, "Send link", () => { Chat.SayInstall(mm.Name); return "Install link posted in chat for " + mm.Name + "."; });
+                if (!mm.Local) SmallButton(_x + _w - 90, y, 90, "Send link", () => Chat.SayInstall()
+                    ? "Install link posted in chat."
+                    : "Chat is busy with trainer replies - try again in a few seconds.");
                 y += BtnH + Gap;
             }
             Hint(ref y, "Not detected = no trainer, or version 1.0 (which didn't report itself).");
@@ -1187,7 +1214,7 @@ namespace MoonTrainer
             {
                 if (m.Local) continue;
                 string n = m.Name; ulong id = m.SteamId;
-                Switch(ref y, "Allow " + n, null, () => Settings.OnAllowlist(n, id, false), v => Settings.SetAllowlisted(n, id, v));
+                Switch(ref y, "Allow " + Plain(n), null, () => Settings.OnAllowlist(n, id, false), v => Settings.SetAllowlisted(n, id, v));
             }
             EndCard(p, ref y);
 
@@ -1211,7 +1238,10 @@ namespace MoonTrainer
         {
             _backups = Game.Backups();
             var a = Card(ref y, null);
-            Buttons(ref y, new[] { "Make a backup now" }, new Func<string>[] { () => { _rebuildPendingAt = Time.unscaledTime + 6f; return Game.BackupNow(); } }, Accent);
+            var make = Buttons(ref y, new[] { "Make a backup now" }, new Func<string>[] { () => Game.BackupNow() }, Accent)[0];
+            // While a backup or restore is under way the button says what it is waiting for. When it ends, the list
+            // rebuilds itself (Refresh watches Game.BackupRevision).
+            _refreshers.Add(() => make.text = Game.BackupBusy ?? "Make a backup now");
             Hint(ref y, "Restoring backs up your current state first, then reloads the shift. Host only.");
             EndCard(a, ref y);
 
@@ -1302,6 +1332,7 @@ namespace MoonTrainer
                 && (_tab == "Teleport" || _tab == "Flags & Sites")) _rebuildPending = true;
             if ((Updates.Available != null) != _updateShown && _tab == "Home") _rebuildPending = true;
             if (_tab == "Locations" && Locations.All().Count != _locationCount) _rebuildPending = true;
+            if (_tab == "Backups" && Game.BackupRevision != _backupRevision) _rebuildPending = true;     // a backup or restore just ended
         }
 
         [HideFromIl2Cpp]
@@ -1485,7 +1516,8 @@ namespace MoonTrainer
         {
             float bw = 80;
             float right = act2 != null ? bw * 2 + Gap : bw;
-            Text(_host, name + (detail != null ? "   <color=#5B6170><size=12>" + detail + "</size></color>" : ""), _x, y, _w - right - 10, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
+            // name and detail are data (a crewmate, a saved spot, a marker), so they're shown as plain text
+            Text(_host, Plain(name) + (detail != null ? "   <color=#5B6170><size=12>" + Plain(detail) + "</size></color>" : ""), _x, y, _w - right - 10, BtnH, 15, true, Cream, TextAlignmentOptions.MidlineLeft);
             SmallButton(_x + _w - right, y, bw, act1, do1, Accent);
             if (act2 != null) SmallButton(_x + _w - bw, y, bw, act2, do2, Danger);
             y += BtnH + Gap;
@@ -1735,14 +1767,14 @@ namespace MoonTrainer
                 p.Img.color = new Color(1f, 1f, 1f, p.Alpha * (1f - p.T));
             }
 
-            // ---- buttons: grow a touch under the mouse, dip when pressed, glow if they're orange ----
+            // ---- buttons: grow a touch under the mouse, dip when pressed, glow if they're accent-coloured ----
             if (!_hoverBroken)
             {
                 try { Hover(_hotChrome, fx, dt); Hover(_hotPage, fx, dt); }
                 catch (Exception e) { _hoverBroken = true; Plugin.Logger.LogWarning("Button hover effects unavailable: " + e.Message); }
             }
 
-            // ---- switches: the knob glides across and the track fades between grey and orange ----
+            // ---- switches: the knob glides across and the track fades between grey and purple ----
             foreach (var k in _knobs)
             {
                 float want = k.On ? 1f : 0f;
@@ -1844,6 +1876,29 @@ namespace MoonTrainer
             rt.anchoredPosition = new Vector2(x, -y);
             rt.sizeDelta = new Vector2(w, h);
             return rt;
+        }
+
+        // Makes text we didn't write (a player's name, lobby data, a saved spot's name) safe to put in a label that has
+        // rich text on - otherwise a Steam name like "<size=900>X" would be obeyed as markup.
+        // Every '<' becomes <noparse><</noparse>. Theirs is then always followed straight away by one of ours, which
+        // TextMeshPro doesn't accept inside a tag, and while noparse is on it obeys nothing but </noparse> anyway.
+        // Nothing of theirs is ever inside the wrapper, so a "</noparse>" of their own has nothing to close.
+        // '\' is wrapped the same way, so a spelled-out character code (backslash, u, 003C) can't turn back into
+        // a '<'. Line breaks and other control characters become spaces.
+        // Only plain ASCII is added, so it doesn't matter which characters the font has.
+        // Use it on the piece that isn't ours, never on a whole label: our own colour and size tags must stay tags.
+        // (The notice line and the toast don't need it: they only ever show messages, so rich text is off there.)
+        public static string Plain(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return s;
+            var sb = new System.Text.StringBuilder(s.Length + 40);
+            foreach (char c in s)
+            {
+                if (c == '<' || c == '\\') sb.Append("<noparse>").Append(c).Append("</noparse>");
+                else if (char.IsControl(c) || c == (char)0x2028 || c == (char)0x2029) sb.Append(' ');
+                else sb.Append(c);
+            }
+            return sb.ToString();
         }
 
         [HideFromIl2Cpp]
