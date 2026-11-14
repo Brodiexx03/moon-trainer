@@ -25,7 +25,7 @@ namespace MoonTrainer
         private static readonly HashSet<string> _seenMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static string _roster;
         private static float _nextMemberPoll;
-        private static bool _membersPrimed;
+        private static bool _membersPrimed, _emptyLook;
         private static string _ownText;
         private static float _ownAt = -100f;
 
@@ -479,6 +479,10 @@ namespace MoonTrainer
                 string key = AccountKey(m.Name, m.SteamId);
                 if (here.Add(key) && _membersPrimed && !_seenMembers.Contains(key)) joined.Add(SafeName(m.Name));
             }
+            // A look that finds nobody may just be a failed read of the lobby list. Believe it only the second time
+            // in a row, or one bad read would have everyone welcomed again in chat.
+            if (here.Count == 0 && _seenMembers.Count > 0 && !_emptyLook) { _emptyLook = true; return; }
+            _emptyLook = false;
             // Only the people here now count as seen: someone who leaves and comes back is welcomed again.
             _seenMembers.Clear();
             _seenMembers.UnionWith(here);

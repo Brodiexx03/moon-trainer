@@ -594,6 +594,7 @@ namespace MoonTrainer
             // Notices are messages, never markup, and many of them name a crewmate or repeat a chat reply. With rich
             // text off, whatever is in them is shown exactly as written.
             _hudNotice.richText = false;
+            NoEscapes(_hudNotice);
         }
 
         // ---- building the window -----------------------------------------------------------------------
@@ -767,6 +768,7 @@ namespace MoonTrainer
             Box(toast.transform, "ToastAccent", 0, 0, 4, 38, AccentSoft, 2);
             _toastText = Text(toast.transform, "", 16, 0, CW - 28, 38, 13, true, Cream, TextAlignmentOptions.MidlineLeft);
             _toastText.richText = false;   // like the notice line: results name players and saved spots, none is markup
+            NoEscapes(_toastText);
             _toastBar = Box(toast.transform, "ToastTime", 14, 35, CW - 28, 2, new Color(AccentSoft.r, AccentSoft.g, AccentSoft.b, 0.8f), 1).rectTransform;
             try
             {
@@ -1888,6 +1890,20 @@ namespace MoonTrainer
         // Only plain ASCII is added, so it doesn't matter which characters the font has.
         // Use it on the piece that isn't ours, never on a whole label: our own colour and size tags must stay tags.
         // (The notice line and the toast don't need it: they only ever show messages, so rich text is off there.)
+        /// <summary>
+        /// Stops a label turning a typed "\n" or "\t" into a real line break or tab. Rich text being off doesn't cover
+        /// that, and a crewmate's name can contain those two characters. On its own and guarded: if this game's
+        /// TextMeshPro has no such switch, the label simply stays as it was.
+        /// </summary>
+        static void NoEscapes(TMP_Text label)
+        {
+            try { TurnEscapesOff(label); }
+            catch (Exception e) { Plugin.Logger.LogInfo("Backslash sequences can't be switched off on this game build: " + e.Message); }
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void TurnEscapesOff(TMP_Text label) { label.parseCtrlCharacters = false; }
+
         public static string Plain(string s)
         {
             if (string.IsNullOrEmpty(s)) return s;

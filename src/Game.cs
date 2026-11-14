@@ -687,7 +687,9 @@ namespace MoonTrainer
             if (_op == OpBackup)
             {
                 if (failed != null) Finish("Backup failed: " + failed);
-                else if (!added) Finish("No new backup needed - nothing has changed since the last one.");
+                else if (!added) Finish(_opUnsaved
+                    ? "No new backup: the game wouldn't save on request, and its last save is already backed up."
+                    : "No new backup needed - nothing has changed since the last one.");
                 else if (partial) Finish("Backup taken, but some files were left out - details are in the console.");
                 else Finish(_opUnsaved ? "Backup taken, but of the last autosave - the game wouldn't save on request." : "Backup taken.");
                 return false;

@@ -195,10 +195,19 @@ namespace MoonTrainer
 
         // ---- allowlist: a display name plus the Steam account that was using it ----
 
+        /// <summary>
+        /// A name the way the lists hold it. The name list is split on ',' and the account list on ';', so both are
+        /// turned into spaces, and every comparison uses this same form - otherwise "a,b" is stored as "a b" and can
+        /// never be found again to switch it off.
+        /// </summary>
+        static string ListName(string name) { return (name ?? "").Replace(",", " ").Replace(";", " ").Trim(); }
+
         static bool NameListed(string name)
         {
+            string want = ListName(name);
+            if (want.Length == 0) return false;
             foreach (var n in ChatAllowlist.Value.Split(','))
-                if (string.Equals(n.Trim(), name, StringComparison.OrdinalIgnoreCase)) return true;
+                if (string.Equals(n.Trim(), want, StringComparison.OrdinalIgnoreCase)) return true;
             return false;
         }
 
@@ -235,7 +244,7 @@ namespace MoonTrainer
             foreach (var kv in accounts)
             {
                 if (kv.Key == steamId) return true;
-                if (string.Equals(kv.Value, name, StringComparison.OrdinalIgnoreCase)) nameTaken = true;
+                if (string.Equals(ListName(kv.Value), ListName(name), StringComparison.OrdinalIgnoreCase)) nameTaken = true;
             }
             if (!listed || nameTaken) return false;
             if (bind)
@@ -249,14 +258,15 @@ namespace MoonTrainer
 
         public static void SetAllowlisted(string name, ulong steamId, bool on)
         {
+            string stored = ListName(name);
             var names = new List<string>();
             foreach (var n in ChatAllowlist.Value.Split(','))
-                if (n.Trim().Length > 0 && !string.Equals(n.Trim(), name, StringComparison.OrdinalIgnoreCase)) names.Add(n.Trim());
-            if (on) names.Add(name.Replace(",", " "));
+                if (n.Trim().Length > 0 && !string.Equals(n.Trim(), stored, StringComparison.OrdinalIgnoreCase)) names.Add(n.Trim());
+            if (on && stored.Length > 0) names.Add(stored);
             ChatAllowlist.Value = string.Join(",", names);
 
             var accounts = AllowedAccounts();
-            accounts.RemoveAll(kv => (steamId != 0 && kv.Key == steamId) || string.Equals(kv.Value, name, StringComparison.OrdinalIgnoreCase));
+            accounts.RemoveAll(kv => (steamId != 0 && kv.Key == steamId) || string.Equals(ListName(kv.Value), stored, StringComparison.OrdinalIgnoreCase));
             if (on && steamId != 0) accounts.Add(new KeyValuePair<ulong, string>(steamId, name));
             SaveAccounts(accounts);
         }
