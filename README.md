@@ -107,7 +107,7 @@ The published builds so far were compiled with Mono's `mcs` against the same ref
 2. Build, and check the DLL really reports the new version (start the game once and read the console line).
 3. Copy the DLL to `Mods/MoonTrainer/MoonTrainer.dll`.
 4. Update `version.json`: the version, a one-line note, and the DLL's checksum from `(Get-FileHash Mods\MoonTrainer\MoonTrainer.dll).Hash`. The installer refuses a download whose checksum doesn't match, so a stale or cut-off file can't be installed.
-5. Run `powershell -ExecutionPolicy Bypass -File tools\check-release.ps1`. It only reads files, and fails if the four version numbers differ, if the checksum in `version.json` isn't the DLL's, or if the DLL was built from older sources.
+5. Run `powershell -ExecutionPolicy Bypass -File tools\check-release.ps1`. It only reads files, and fails if the four version numbers differ, if the checksum in `version.json` isn't the DLL's, or if the DLL doesn't contain the new version number (it was built before the version was bumped). It can't tell whether the DLL has your latest code changes, so still check the console line from step 2.
 6. Push to a test branch first and install from it on one PC:
 
    ```powershell

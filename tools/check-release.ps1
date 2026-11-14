@@ -3,7 +3,8 @@
 # It only reads files. It fails (exit code 1) if:
 #   - the version in src\Plugin.cs, Mods\MoonTrainer\mod.json, MoonTrainer.csproj and version.json are not all the same
 #   - version.json has no sha256, or it is not the checksum of Mods\MoonTrainer\MoonTrainer.dll
-#   - the DLL does not contain that version number (it was built from older sources: this is what went wrong in 1.2.1)
+#   - the DLL does not contain that version number (it was built before the version was bumped: this is what went
+#     wrong in 1.2.1). It cannot tell whether the DLL has later code changes made under the same version number.
 param([string]$Root = (Split-Path -Parent $PSScriptRoot))
 
 $ErrorActionPreference = "Stop"
@@ -46,7 +47,7 @@ else {
         $wide = -join ($version.ToCharArray() | ForEach-Object { "$_" + [char]0 })
         $inside = $text.Contains($version) -or $text.Contains($wide)
         Write-Host ("  {0,-28} {1}" -f "DLL reports $version", $(if ($inside) { "yes" } else { "NO" }))
-        if (-not $inside) { $problems += "The DLL does not contain '$version'. It was probably built from older sources - rebuild and copy it again." }
+        if (-not $inside) { $problems += "The DLL does not contain '$version'. It was built before the version was bumped - rebuild and copy it again." }
     }
 }
 
