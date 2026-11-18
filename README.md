@@ -12,6 +12,20 @@ irm https://raw.githubusercontent.com/Brodiexx03/moon-trainer/main/install.ps1 |
 
 It installs MSML if you don't have it (about a minute), then adds Moon Trainer and enables it. Launch the game from Steam as normal — you'll hear a two-tone chime when the trainer attaches.
 
+## Uninstall
+
+Close the game, open **PowerShell**, paste:
+
+```powershell
+irm https://raw.githubusercontent.com/Brodiexx03/moon-trainer/main/uninstall.ps1 | iex
+```
+
+It removes Moon Trainer and switches it off in the mod loader, then asks whether to delete your trainer settings as well. The mod loader (MSML), any other mods and your saves aren't touched.
+
+By hand it's one folder: delete `Mods\MoonTrainer` inside the game folder. Your settings, saved locations and presets are in `BepInEx\config\moontrainer.cfg`.
+
+To remove the mod loader too, run [MSML's own command](https://github.com/Wehrum/MSML#install-update-or-uninstall) and choose Uninstall.
+
 ## Controls
 
 | Key | |
@@ -99,7 +113,7 @@ dotnet build -c Release -p:GameDir="D:\SteamLibrary\steamapps\common\Moon Sweepe
 
 The DLL lands in `bin\`. Copy it and `Mods\MoonTrainer\mod.json` into `<game>\Mods\MoonTrainer\` to try it.
 
-The published builds so far were compiled with Mono's `mcs` against the same references, so the source stays inside C# 6. It also compiles cleanly with Roslyn's `csc` at `-langversion:6` against the references the project file lists, but `dotnet build` on `MoonTrainer.csproj` itself has not been run yet, so treat the first run as a test.
+The published builds are compiled with Roslyn (the same C# compiler the .NET SDK uses), run directly against the references the project file lists. The source sticks to older C# features so other compilers can build it too. `dotnet build` on `MoonTrainer.csproj` itself has not been run yet, so treat the first run as a test.
 
 ## Releasing
 
